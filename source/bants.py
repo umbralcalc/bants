@@ -16,32 +16,39 @@ import pandas as pd
 class bants:
 
 
-    # Initialisation needs no inputs
-    def __init__(self):       
+    # Initialisation needs only the network type as input. Only type so far is 'AR-GP'.
+    def __init__(self,net_type):       
 
         # Methods and functions    
         self.fit
         self.predict
-        self.optimise_kernel
-        self.optimise_hyperparameters  
+        self.optimise_ARGP_hyperp
+        
+        # Set network type
+        self.net_type = net_type
+        
+        # Initialise empty dictionaries of network parameters to learn, fitting information and prediction results
+        self.params = {}
+        self.info = {}
+        self.results = {}
 
-        # Default type of convolution kernel for each column is always 'SquareExp'. The other option, for oscillatory 
-        # columns in the data over time, is 'Periodic'. 
-        self.column_kernel_types = ['SquareExp']
+        # If network type is 'AR-GP' then set kernel scales
+        if self.net_type == 'AR-GP':
+            # Default type of convolution kernel for each column is always 'SquareExp'. The other option, for oscillatory 
+            # columns in the data over time, is 'Periodic'. 
+            self.column_kernel_types = ['SquareExp']
 
 
-    # Function for optimising the kernel convolution parameters with different kernel types
-    def optimise_kernel(self,data,kern_type):
+    # Function for optimising the hyperparameters of the 'AR-GP' network 
+    def optimise_ARGP_hyperp(self,data):
     '''
+    Method of second-order gradient descent to optimise the 'AG-GP' network hyperparameters as defined in 
+    notes/how_bants_works.ipynb. Optimisation outputs are written to bants.params and bants.info accordingly. 
+    
     INPUT:
 
-    data         -      Should just be a 1d array of data values to optimise the kernel over.
-
-    kern_type    -      Can either be 'SquareExp' or 'Periodic' at the moment - see: notes/how_bants_works.ipynb.
-
-    OUTPUT:
-
-    opt_h        -      The maximum likelihood kernel scale obtained from optimisation.
+    data         -      This is an input dataframe representing the data of the vector time series process that
+                        one wishes to model. Simply set this to be a pandas dataframe with time as the index.
                        
     '''
 
