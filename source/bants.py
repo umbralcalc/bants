@@ -172,7 +172,7 @@ class bants:
         
         # If not set make a first guess for nu, h and the lower triangular elements of Psi
         if self.nu_guess is None: 
-            self.nu_guess = self.Nd
+            self.nu_guess = self.Ns-1
         if self.h_guess is None: 
             self.h_guess = (df.index[1]-df.index[0])*np.ones(self.Nd)
         if self.Psi_tril_guess is None:
