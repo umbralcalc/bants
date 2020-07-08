@@ -122,12 +122,14 @@ class bants:
             # Output weights corresponding to the convolution kernels
             if kern_type == 'SquareExp': return np.exp(-dtimes**2.0/(2.0*(h**2.0)))
             if kern_type == 'Periodic': return np.exp(-2.0*((np.sin(np.abs(np.pi*dtimes/perd)))**2.0)/(h**2.0))
-    
+
         # Evaluate the convolution on the data dependent on the choice of kernel
         conv_d = np.asarray([((self.column_kernel_types[i] == 'SquareExp')*np.convolve(df.values[:,i],\
-                 kern_array('SquareExp',h[i],self.signal_periods[i]))[:self.Ns]) + \
+                 kern_array('SquareExp',h[i],self.signal_periods[i]))[:self.Ns]/\
+                 np.sum(kern_array('SquareExp',h[i],self.signal_periods[i]))) + \
                  ((self.column_kernel_types[i] == 'Periodic')*np.convolve(df.values[:,i],\
-                 kern_array('Periodic',h[i],self.signal_periods[i]))[:self.Ns]) for i in range(0,self.Nd)]).T
+                 kern_array('Periodic',h[i],self.signal_periods[i]))[:self.Ns]/\
+                 np.sum(kern_array('Periodic',h[i],self.signal_periods[i]))) for i in range(0,self.Nd)]).T
         
         # Return convolved signals
         return conv_d
