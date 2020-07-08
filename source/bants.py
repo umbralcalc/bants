@@ -46,8 +46,10 @@ class bants:
         self.std_train_df = []
         self.standardised = False
         
-        # Set the default maximum number of iterations permitted for any optimisation algorithm
+        # Set the default maximum number of iterations, the log-evidence tolerance and the optimisation algorithm
         self.itmax = 1000
+        self.lnEtol = 0.05
+        self.optimiser = 'BFGS' # 'Nelder-Mead' is the other choice
 
         # If network type is 'AR-GP' then set kernel types
         if self.net_type == 'AR-GP':
@@ -62,7 +64,7 @@ class bants:
             
             # Initial guesses for optimiser of the hyperparameters of the network
             self.nu_guess = None
-            self.h_guess = None
+            self.hsq_guess = None
             self.Psi_tril_guess = None
 
 
@@ -92,7 +94,7 @@ class bants:
 
 
     # Kernel convolution for the 'AR-GP' network
-    def kconv(self,df,h):
+    def kconv(self,df,hsq):
         '''
         Method of kernel convolution on input dataframe values according to whichever kernel types were specified
         in the bants.column_kernel_types list. This is used mainly in bants.optimise_ARGP_hyperp but can be used
@@ -102,8 +104,9 @@ class bants:
     
         df       -     This is the input dataframe of values to perform the convolution on.
     
-        h        -     This is an input 1-d array of the same length as the number of columns in the dataframe.
-    
+        hsq      -     This is an input 1-d array of the same length as the number of columns in the dataframe
+                       containing the square-amplitude of the kernel scales for each time series dimension.
+                       
         OUTPUT:
     
         conv_d   -     This is an output array of convolved data the same shape as the input dataframe.
@@ -117,19 +120,19 @@ class bants:
         
         # Create function which returns an array corresponding to the convolution window function for
         # the chosen input kernel type.
-        def kern_array(kern_type,h,perd):
+        def kern_array(kern_type,hsq,perd):
             
             # Output weights corresponding to the convolution kernels
-            if kern_type == 'SquareExp': return np.exp(-dtimes**2.0/(2.0*(h**2.0)))
-            if kern_type == 'Periodic': return np.exp(-2.0*((np.sin(np.abs(np.pi*dtimes/perd)))**2.0)/(h**2.0))
+            if kern_type == 'SquareExp': return np.exp(-dtimes**2.0/(2.0*hsq))
+            if kern_type == 'Periodic': return np.exp(-2.0*((np.sin(np.abs(np.pi*dtimes/perd)))**2.0)/hsq)
 
         # Evaluate the convolution on the data dependent on the choice of kernel
         conv_d = np.asarray([((self.column_kernel_types[i] == 'SquareExp')*np.convolve(df.values[:,i],\
-                 kern_array('SquareExp',h[i],self.signal_periods[i]))[:self.Ns]/\
-                 np.sum(kern_array('SquareExp',h[i],self.signal_periods[i]))) + \
+                 kern_array('SquareExp',hsq[i],self.signal_periods[i]))[:self.Ns]/\
+                 np.sum(kern_array('SquareExp',hsq[i],self.signal_periods[i]))) + \
                  ((self.column_kernel_types[i] == 'Periodic')*np.convolve(df.values[:,i],\
-                 kern_array('Periodic',h[i],self.signal_periods[i]))[:self.Ns]/\
-                 np.sum(kern_array('Periodic',h[i],self.signal_periods[i]))) for i in range(0,self.Nd)]).T
+                 kern_array('Periodic',hsq[i],self.signal_periods[i]))[:self.Ns]/\
+                 np.sum(kern_array('Periodic',hsq[i],self.signal_periods[i]))) for i in range(0,self.Nd)]).T
         
         # Return convolved signals
         return conv_d
@@ -146,47 +149,90 @@ class bants:
         df    -     This is the input dataframe of values to optimise the hyperparameters with respect to.
                        
         '''
-        # Define the function to optimise over to obtain optimal network hyperparameters
-        def func_to_opt(params,df=df,N=self.Nd):
-            
-            # Extract hyperparameters
-            nu = params[0]
-            h = params[1:N+1]
-            Psi = np.zeros((N,N))
-            Psi[np.tril_indices(N)] = params[N+1:]
-            
-            # Psi is symmetric
-            Psi[np.tril_indices(N,-1)] = Psi.T[np.tril_indices(N,-1)]
-            
-            # Compute the kernel-convolved signal for each data point
-            Mt = self.kconv(df,h)
-            
-            # Compute the scale matrix
-            Sm = Psi/(nu-N+1.0)
-            
-            # Sum log-evidence contributions by each data point
-            lnE = np.sum(self.tD_logpdf(df,nu-N+1.0,Mt,Sm),axis=0)
-            
-            # Output corresponding value to minimise
-            return -lnE
-        
         # If not set make a first guess for nu, h and the lower triangular elements of Psi
         if self.nu_guess is None: 
             self.nu_guess = self.Ns-1
-        if self.h_guess is None: 
-            self.h_guess = (df.index[1]-df.index[0])*np.ones(self.Nd)
+        if self.hsq_guess is None: 
+            self.hsq_guess = ((df.index[1]-df.index[0])**2.0)*np.ones(self.Nd)
         if self.Psi_tril_guess is None:
-            Mt = self.kconv(df,self.h_guess)
-            self.Psi_tril_guess = np.cov(Mt.T)[np.tril_indices(self.Nd)]
+            Mt = self.kconv(df,self.hsq_guess)
+            self.Psi_tril_guess = (self.Ns+self.Nd)*np.cov(Mt.T)[np.tril_indices(self.Nd)]
     
-        # With initial guesses for the parameters implement Nelder-Mead optimisation with bants.itmax as the maximum
-        # number of iterations permitted for the algorithm
-        init_params = tf.constant(np.append(np.append(self.nu_guess,self.h_guess),self.Psi_tril_guess))
-        res = tfp.optimizer.nelder_mead_minimize(func_to_opt, initial_vertex=init_params, max_iterations=self.itmax)
+        # With initial guesses for the parameters implement optimisation with bants.itmax as the maximum
+        # number of iterations permitted for the algorithm and bants.lnEtol as the log-evidence tolerance.
+        # Options are the Nelder-Mead algorithm...
+        if self.optimiser == 'Nelder-Mead':
+            
+            # Define the function to optimise over to obtain optimal network hyperparameters if Nelder-Mead
+            def func_to_opt(params,df=df,N=self.Nd):
+            
+                # Extract hyperparameters
+                nu = params[0]
+                hsq = params[1:N+1]
+                Psi = np.zeros((N,N))
+                Psi[np.tril_indices(N)] = params[N+1:]
+            
+                # Psi is symmetric
+                Psi[np.tril_indices(N,-1)] = Psi.T[np.tril_indices(N,-1)]
+            
+                # Compute the kernel-convolved signal for each data point
+                Mt = self.kconv(df,hsq)
+            
+                # Compute the scale matrix
+                Sm = Psi/(nu-N+1.0)
+            
+                # Sum log-evidence contributions by each data point
+                lnE = np.sum(self.tD_logpdf(df,nu-N+1.0,Mt,Sm),axis=0)
+            
+                # Output corresponding value to minimise
+                return -lnE
+            
+            # Run Nelder-Mead algorithm and obtain result
+            init_params = tf.constant(np.append(np.append(self.nu_guess,self.hsq_guess),self.Psi_tril_guess))
+            res = tfp.optimizer.nelder_mead_minimize(func_to_opt, initial_vertex=init_params,\
+                                                     max_iterations=self.itmax, func_tolerance=self.lnEtol)
+
+        # Or the L-BFGS algorithm...
+        if self.optimiser == 'BFGS':
+            
+            # Define the function to optimise over to obtain optimal network hyperparameters if BFGS
+            def func_to_opt(params,df=df,N=self.Nd):
+            
+                # Extract hyperparameters
+                nu = params[0]
+                hsq = params[1:N+1]
+                Psi = np.zeros((N,N))
+                Psi[np.tril_indices(N)] = params[N+1:]
+            
+                # Psi is symmetric
+                Psi[np.tril_indices(N,-1)] = Psi.T[np.tril_indices(N,-1)]
+            
+                # Compute the kernel-convolved signal for each data point
+                Mt = self.kconv(df,hsq)
+            
+                # Compute the scale matrix
+                Sm = Psi/(nu-N+1.0)
+            
+                # Sum log-evidence contributions by each data point
+                lnE = np.sum(self.tD_logpdf(df,nu-N+1.0,Mt,Sm),axis=0)
+            
+                # Compute the gradient values
+                DlnE = np.zeros_like(params)
+                #DlnE[0] = 
+                #DlnE[1:N+1] = 
+                #DlnE[N+1:] = 
+            
+                # Output corresponding value to minimise and its gradient
+                return -lnE, -DlnE
+            
+            # Run L-BFGS algorithm and obtain result
+            init_params = tf.constant(np.append(np.append(self.nu_guess,self.hsq_guess),self.Psi_tril_guess))
+            res = tfp.optimizer.lbfgs_minimize(func_to_opt, initial_position=init_params,\
+                                               max_iterations=self.itmax, f_relative_tolerance=self.lnEtol)
     
         # Output results of optimisation to bants.params dictionary
         self.params['nu'] = res.position[0].numpy()
-        self.params['h'] = res.position[1:self.Nd+1].numpy()
+        self.params['hsq'] = res.position[1:self.Nd+1].numpy()
         self.params['Psi_tril'] = res.position[self.Nd+1:].numpy()
         
         # Output fitting information to bants.info dictionary
