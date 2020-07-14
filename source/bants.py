@@ -222,39 +222,45 @@ class bants:
     
     
     # Function to output random posterior prediction samples corresponding to the the 'AR-GP' network 
-    def pred_ARGP_sampler(self,nfut,nsamples):
+    def pred_ARGP_sampler(self,ftime,nsamples):
         '''
         Function which generates posterior predictive samples for the N-dimensional time series using the 
         'AR-GP' network, where its hyperparameters have been optimised by applying bants.fit to a dataframe. 
 
         INPUT:
 
-        nfut         -     This is an input number of future timesteps to generate random samples for.
+        ftime        -     This is the timepoint (in units of the index of the train_df) for the forecast 
+                           to run up to from the training data endpoint.
         
-        nsamples     -     This is an input number of random predictive samples to request for at each timestep.
+        nsamples     -     This is the number of random predictive samples to request for at each timestep.
         
         OUTPUT:
         
         pred_samps   -     This is an output array of dimensions (nfut,nsamples).
         
         '''
+        # Compute the number of timesteps to predict over from ftime
+        delta_t = self.train_df.index[1]-self.train_df.index[0]
+        nfut = int(np.ceil((ftime-self.train_df.index[-1])/delta_t))
         
         # Extract optimised hyperparameters
         nu_opt = self.params['nu']
         hsq_opt = self.params['hsq']
-        Psi_opt = np.zeros((N,N))
-        Psi_opt[np.tril_indices(N)] = self.params['Psi_tril']
+        Psi_opt = np.zeros((self.Nd,self.Nd))
+        Psi_opt[np.tril_indices(self.Nd)] = self.params['Psi_tril']
              
         # Psi is symmetric
         Psi_opt = Psi_opt + Psi_opt.T - np.diag(Psi_opt.diagonal())
 
-        # Loop over future samples so that the previous samples can be used iteratively in the kernel convolution.
-        pred_samps = []
-        for nf in range(0,nfut):
+        # Loop over future samples so that the previous samples can be used iteratively in the kernel convolution
+        pred_samps = [np.asarray([np.random.multivariate_normal(self.kconv(self.train_df,hsq_opt),\
+                      spst.invwishart.rvs(df=nu_opt,scale=Psi_opt)) for ns in range(0,nsamples)])]
+        for nf in range(1,nfut):
             
             # Generate samples from the 'AR-GP' network by drawing covariance matrices from the inverse-Wishart 
             # distribution, drawing the corresponding normal variates and then storing them to output
-            pred_samps.append(np.asarray([np.random.multivariate_normal(self.kconv(self.train_df.append(....),hsq_opt),\
+            pred_samps.append(np.asarray([np.random.multivariate_normal(\
+                       self.kconv(self.train_df.append(pred_samps[nf-1][ns]),hsq_opt),\
                        spst.invwishart.rvs(df=nu_opt,scale=Psi_opt)) for ns in range(0,nsamples)]))
             
         # Convert to numpy array and output result
@@ -484,15 +490,16 @@ class bants:
 
 
     # Method of 'predict' is analogous to the scikit-learn pattern
-    def predict(self,nfut,validate=None):
+    def predict(self,ftime,validate=None):
         '''
         Method to make posterior predictions for the N-dimensional time series using the fitted 'bants' network. All of 
         the results from the prediction, including a future point sampler and potentially the results of the 
         cross-validation against the testing data (if this was provided) can be found in the bants.results dictionary.
 
         INPUT:
-
-        nfut         -     This is an input number of future timesteps to generate predictive distributions over. 
+        
+        ftime        -     This is the timepoint (in units of the index of the train_df) for the forecast 
+                           to generate predictive distributions up to from the training data endpoint. 
 
         validate     -     (Optional) One can input a dataframe representing the testing data of the vector time series 
                            process to cross-validate the 'bants' predictions against. Simply set this to be a pandas 
@@ -503,7 +510,9 @@ class bants:
         self.predict_times = times
         if validate is not None: self.test_df = validate
             
-        
+        # Compute the number of timesteps to predict over from ftime
+        delta_t = self.train_df.index[1]-self.train_df.index[0]
+        nfut = int(np.ceil((ftime-self.train_df.index[-1])/delta_t))
         
         
         #if self.standardised == True:
