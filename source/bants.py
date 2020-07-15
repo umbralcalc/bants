@@ -64,8 +64,8 @@ class bants:
             # the same length as the dimensions (columns) in the data where entries are relevant for 'Periodic' columns.
             self.signal_periods = [1.0]
             
-            # Initial guesses for optimiser of the hyperparameters of the network
-            self.nu_guess = None
+            # Initial params and guesses for optimiser of the hyperparameters of the network
+            self.nu = None
             self.hsq_guess = None
             self.Psi_tril_guess = None
 
@@ -74,25 +74,18 @@ class bants:
     # log-Probability Density Function from input dataframe points. No scipy implementation so wrote this one.
     def tD_logpdf(self,df,nu,mu,Sigma):
 
-        # Parameter nu must be positive real
-        if nu > 0.0:
-            
-            # Compute the log normalisation of the distribution using scipy loggammas
-            log_norm = sps.loggamma((nu+self.Nd)/2.0) - sps.loggamma(nu/2.0) - \
-                       ((self.Nd/2.0)*np.log(np.pi*nu)) - (0.5*np.log(np.linalg.det(Sigma)))
+        # Compute the log normalisation of the distribution using scipy loggammas
+        log_norm = sps.loggamma((nu+self.Nd)/2.0) - sps.loggamma(nu/2.0) - \
+                   ((self.Nd/2.0)*np.log(np.pi*nu)) - (0.5*np.log(np.linalg.det(Sigma)))
         
-            # Compute the log density function for each of the samples
-            x_minus_mu = df.values-mu
-            inverseSigma = np.linalg.inv(Sigma)
-            contraction = np.sum(x_minus_mu.T*np.tensordot(inverseSigma,x_minus_mu,axes=([0],[1])),axis=0)
-            log_densfunc = np.sum(-((nu+self.Nd)/2.0)*np.log(1.0+(contraction/nu)))
+        # Compute the log density function for each of the samples
+        x_minus_mu = df.values-mu
+        inverseSigma = np.linalg.inv(Sigma)
+        contraction = np.sum(x_minus_mu.T*np.tensordot(inverseSigma,x_minus_mu,axes=([0],[1])),axis=0)
+        log_densfunc = np.sum(-((nu+self.Nd)/2.0)*np.log(1.0+(contraction/nu)))
             
-            # Output result
-            return log_norm + log_densfunc
-
-        # Else return infinitely small value
-        else:
-            return -np.inf
+        # Output result
+        return log_norm + log_densfunc
 
 
     # Kernel convolution for the 'AR-GP' network
@@ -244,7 +237,6 @@ class bants:
         nfut = int(np.ceil((ftime-self.train_df.index[-1])/delta_t))
         
         # Extract optimised hyperparameters
-        nu_opt = self.params['nu']
         hsq_opt = self.params['hsq']
         Psi_opt = np.zeros((self.Nd,self.Nd))
         Psi_opt[np.tril_indices(self.Nd)] = self.params['Psi_tril']
@@ -253,15 +245,15 @@ class bants:
         Psi_opt = Psi_opt + Psi_opt.T - np.diag(Psi_opt.diagonal())
 
         # Loop over future samples so that the previous samples can be used iteratively in the kernel convolution
-        pred_samps = [np.asarray([np.random.multivariate_normal(self.kconv(self.train_df,hsq_opt),\
-                      spst.invwishart.rvs(df=nu_opt,scale=Psi_opt)) for ns in range(0,nsamples)])]
+        pred_samps = [np.asarray([np.random.multivariate_normal(self.kconv(self.train_df,hsq_opt)[-1],\
+                      spst.invwishart.rvs(df=self.nu,scale=Psi_opt)) for ns in range(0,nsamples)])]
         for nf in range(1,nfut):
             
             # Generate samples from the 'AR-GP' network by drawing covariance matrices from the inverse-Wishart 
             # distribution, drawing the corresponding normal variates and then storing them to output
             pred_samps.append(np.asarray([np.random.multivariate_normal(\
-                       self.kconv(self.train_df.append(pred_samps[nf-1][ns]),hsq_opt),\
-                       spst.invwishart.rvs(df=nu_opt,scale=Psi_opt)) for ns in range(0,nsamples)]))
+                       self.kconv(self.train_df.append(pred_samps[nf-1][ns]),hsq_opt)[-1],\
+                       spst.invwishart.rvs(df=self.nu,scale=Psi_opt)) for ns in range(0,nsamples)]))
             
         # Convert to numpy array and output result
         pred_samps = np.asarray(pred_samps)
@@ -279,9 +271,11 @@ class bants:
         df    -     This is the input dataframe of values to optimise the hyperparameters with respect to.
                        
         '''
-        # If not set make a first guess for nu, h and the lower triangular elements of Psi
-        if self.nu_guess is None: 
-            self.nu_guess = self.Nd
+        # Set the number of degrees of freedom to correspond to correspond to the non-informative prior
+        self.nu = self.Nd
+        self.params['nu'] = self.nu
+        
+        # If not set make a first guess for h and the lower triangular elements of Psi
         if self.hsq_guess is None:
             # Create autocorrelation function to make initial guess for kernel scale
             def acf(df,dim,lag): return np.corrcoef(np.array([df.values[:-lag,dim], df.values[lag:,dim]]))[0,1]
@@ -291,7 +285,7 @@ class bants:
                 acs = np.asarray([acf(df,dim,lag) for lag in range(1,self.Ns-1)])
                 acs = acs*(acs>0.0)
                 hs.append(np.sum(((df.index[1:-1]-df.index[0])**2.0)*acs)/np.sum(acs))
-            # Set computed guesses
+            # Set computed guesses as converted array
             self.hsq_guess = np.asarray(hs)
         if self.Psi_tril_guess is None:
             Mt = self.kconv(df,self.hsq_guess)
@@ -306,10 +300,9 @@ class bants:
             def func_to_opt(params,df=df,N=self.Nd):
             
                 # Extract hyperparameters
-                nu = np.exp(params[0])      # Choose log space for nu for scaling and to avoid negative values
-                hsq = np.exp(params[1:N+1]) # Choose log space for hsq for scaling and to avoid negative values
+                hsq = np.exp(params[:N]) # Choose log space for hsq for scaling and to avoid negative values
                 Psi = np.zeros((N,N))
-                Psi[np.tril_indices(N)] = params[N+1:]
+                Psi[np.tril_indices(N)] = params[N:]
              
                 # Psi is symmetric
                 Psi = Psi + Psi.T - np.diag(Psi.diagonal())
@@ -318,24 +311,22 @@ class bants:
                 Mt = self.kconv(df,hsq)
             
                 # Compute the scale matrix
-                Sm = Psi/(nu-N+1.0)
+                Sm = Psi/(self.nu-N+1.0)
             
                 # Sum log-evidence contributions by each data point
-                lnE = np.sum(self.tD_logpdf(df,nu-N+1.0,Mt,Sm),axis=0)
+                lnE = np.sum(self.tD_logpdf(df,self.nu-N+1.0,Mt,Sm),axis=0)
             
                 # Output corresponding value to minimise
                 return -lnE          
             
             # Run Nelder-Mead algorithm and obtain result
-            init_params = tf.constant(np.append(np.append(np.log(self.nu_guess),\
-                                      np.log(self.hsq_guess)),self.Psi_tril_guess))
+            init_params = tf.constant(np.append(np.log(self.hsq_guess),self.Psi_tril_guess))
             res = tfp.optimizer.nelder_mead_minimize(func_to_opt, initial_vertex=init_params, \
                                 max_iterations=self.itmax, func_tolerance=self.lnEtol)
             
             # Output results of optimisation to bants.params dictionary
-            self.params['nu'] = np.exp(res.position[0].numpy())
-            self.params['hsq'] = np.exp(res.position[1:self.Nd+1].numpy())
-            self.params['Psi_tril'] = res.position[self.Nd+1:].numpy()
+            self.params['hsq'] = np.exp(res.position[:self.Nd].numpy())
+            self.params['Psi_tril'] = res.position[self.Nd:].numpy()
         
             # Output fitting information to bants.info dictionary
             self.info['converged'] = res.converged.numpy()
@@ -352,10 +343,9 @@ class bants:
             def func_to_opt(params,df=df,N=self.Nd):
             
                 # Extract hyperparameters
-                nu = np.exp(params[0])      # Choose log space for nu for scaling and to avoid negative values
-                hsq = np.exp(params[1:N+1]) # Choose log space for hsq for scaling and to avoid negative values
+                hsq = np.exp(params[:N]) # Choose log space for hsq for scaling and to avoid negative values
                 Psi = np.zeros((N,N))
-                Psi[np.tril_indices(N)] = params[N+1:]
+                Psi[np.tril_indices(N)] = params[N:]
              
                 # Psi is symmetric
                 Psi = Psi + Psi.T - np.diag(Psi.diagonal())
@@ -364,10 +354,10 @@ class bants:
                 Mt = self.kconv(df,hsq)
             
                 # Compute the scale matrix
-                Sm = Psi/(nu-N+1.0)
+                Sm = Psi/(self.nu-N+1.0)
             
                 # Sum log-evidence contributions by each data point
-                lnE = np.sum(self.tD_logpdf(df,nu-N+1.0,Mt,Sm),axis=0)
+                lnE = np.sum(self.tD_logpdf(df,self.nu-N+1.0,Mt,Sm),axis=0)
             
                 # Output corresponding value to minimise
                 return -lnE
@@ -376,10 +366,9 @@ class bants:
             def Dfunc_to_opt(params,df=df,N=self.Nd):
             
                 # Extract hyperparameters
-                nu = np.exp(params[0])      # Choose log space for nu for scaling and to avoid negative values
-                hsq = np.exp(params[1:N+1]) # Choose log space for hsq for scaling and to avoid negative values
+                hsq = np.exp(params[:N]) # Choose log space for hsq for scaling and to avoid negative values
                 Psi = np.zeros((N,N))
-                Psi[np.tril_indices(N)] = params[N+1:]
+                Psi[np.tril_indices(N)] = params[N:]
             
                 # Psi is symmetric
                 Psi = Psi + Psi.T - np.diag(Psi.diagonal())
@@ -394,32 +383,27 @@ class bants:
                 vect = np.tensordot(inversePsi,x_minus_mu,axes=([0],[1]))
                 contraction = np.sum(x_minus_mu.T*vect,axis=0)
                 DlnE = np.zeros_like(params)
-                # Multiplying by nu here for logarithmic derivative
-                DlnE[0] = nu*(((sps.digamma((nu+1.0)/2.0)-sps.digamma((nu-N+1.0)/2.0))/2.0) - \
-                            np.sum(0.5*np.log(1.0+contraction)))
                 # Multiplying by hsq here for logarithmic derivative
-                DlnE[1:N+1] = -hsq*np.sum((nu+1.0)*DMt.T*vect/np.tensordot(np.ones(N),\
-                                                              1.0+contraction,axes=0),axis=1)
-                DlnE[N+1:] = -0.5*np.identity(N)[np.tril_indices(N)] + \
-                              (((nu+1.0)/2.0)*np.sum(x_minus_mu[:,np.tril_indices(N)[0]].T*\
-                              np.tensordot(inversePsisq[np.tril_indices(N)],np.ones(self.Ns),axes=0)*\
-                              x_minus_mu[:,np.tril_indices(N)[1]].T/\
-                              np.tensordot(np.ones_like(params[N+1:]),1.0+contraction,axes=0),axis=1))
+                DlnE[:N] = -hsq*np.sum((self.nu+1.0)*DMt.T*vect/np.tensordot(np.ones(N),\
+                                                     1.0+contraction,axes=0),axis=1)
+                DlnE[N:] = -0.5*np.identity(N)[np.tril_indices(N)] + \
+                            (((self.nu+1.0)/2.0)*np.sum(x_minus_mu[:,np.tril_indices(N)[0]].T*\
+                            np.tensordot(inversePsisq[np.tril_indices(N)],np.ones(self.Ns),axes=0)*\
+                            x_minus_mu[:,np.tril_indices(N)[1]].T/\
+                            np.tensordot(np.ones_like(params[N:]),1.0+contraction,axes=0),axis=1))
                 
                 # Output corresponding value to minimise and its gradient
                 return -DlnE
             
             # Run BFGS algorithm and obtain result with scipy optimiser
             # (tfp lbfgs optimiser didn't seem to work for some reason)
-            init_params = np.append(np.append(np.log(self.nu_guess),\
-                                              np.log(self.hsq_guess)),self.Psi_tril_guess)
+            init_params = np.append(np.log(self.hsq_guess),self.Psi_tril_guess)
             res = spo.minimize(func_to_opt, init_params, method='BFGS', jac=Dfunc_to_opt, \
                                options={'gtol': self.lnEtol, 'maxiter': self.itmax})
     
             # Output results of optimisation to bants.params dictionary
-            self.params['nu'] = np.exp(res.x[0])
-            self.params['hsq'] = np.exp(res.x[1:self.Nd+1])
-            self.params['Psi_tril'] = res.x[self.Nd+1:]
+            self.params['hsq'] = np.exp(res.x[:self.Nd])
+            self.params['Psi_tril'] = res.x[self.Nd:]
         
             # Output fitting information to bants.info dictionary
             self.info['converged'] = res.success
