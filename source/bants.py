@@ -44,8 +44,8 @@ class bants:
         self.results = {}
         
         # Store the mean and standard deviation of the training data and store if standardisation has been performed
-        self.mean_train_df = []
-        self.std_train_df = []
+        self.mean_train_df = None
+        self.std_train_df = None
         self.standardised = False
         
         # Set the default maximum number of iterations, the log-evidence tolerance and the optimisation algorithm
@@ -229,7 +229,8 @@ class bants:
         
         OUTPUT:
         
-        pred_samps   -     This is an output array of dimensions (nfut,nsamples).
+        pred_samps   -     This is an output array of dimensions (nfut,dim,nsamples), where dim is the number
+                           of dimensions in the vector time series.
         
         '''
         # Compute the number of timesteps to predict over from ftime
@@ -244,20 +245,39 @@ class bants:
         # Psi is symmetric
         Psi_opt = Psi_opt + Psi_opt.T - np.diag(Psi_opt.diagonal())
 
-        # Loop over future samples so that the previous samples can be used iteratively in the kernel convolution
-        pred_samps = [np.asarray([np.random.multivariate_normal(self.kconv(self.train_df,hsq_opt)[-1],\
-                      spst.invwishart.rvs(df=self.nu,scale=Psi_opt)) for ns in range(0,nsamples)])]
-        for nf in range(1,nfut):
+        # Generate future timepoints, storage for predictions and loop over samples (slow, I know)
+        indices = np.asarray([(float(nf)*delta_t)+self.train_df.index[-1] for nf in range(0,nfut)])
+        pred_samps = np.empty((nfut,self.Nd,0))
+        for ns in range(0,nsamples):
             
-            # Generate samples from the 'AR-GP' network by drawing covariance matrices from the inverse-Wishart 
-            # distribution, drawing the corresponding normal variates and then storing them to output
-            pred_samps.append(np.asarray([np.random.multivariate_normal(\
-                       self.kconv(self.train_df.append(pred_samps[nf-1][ns]),hsq_opt)[-1],\
-                       spst.invwishart.rvs(df=self.nu,scale=Psi_opt)) for ns in range(0,nsamples)]))
+            # Generate random covariance matrix from inverse-Wishart with optimal hyperparameters
+            Sigt = spst.invwishart.rvs(df=self.nu,scale=Psi_opt)
             
-        # Convert to numpy array and output result
-        pred_samps = np.asarray(pred_samps)
-        return pred_samps
+            # Loop over future timepoints and generate samples from the 'AR-GP' network iteratively (slow, I know)
+            out = [np.random.multivariate_normal(self.kconv(self.train_df,hsq_opt)[-1],Sigt)]
+            for nf in range(1,nfut):  
+                
+                # Generate updated dataframe using past predicted samples
+                d_update = self.train_df.append(pd.DataFrame(data=np.asarray(out)[:nf],index=indices[:nf]))
+                
+                # Draw the corresponding normal variate
+                samp = np.random.multivariate_normal(self.kconv(d_update,hsq_opt)[-1],Sigt)
+            
+                # Store sample to output
+                out.append(samp)
+            
+            # Add new set of predicted future timepoints to output
+            pred_samps = np.dstack((pred_samps,np.asarray(out)))
+        
+        # Output predictive samples with or without standardisation
+        if self.standardised == True:
+            mfact = np.tensordot(np.tensordot(np.ones(nfut),\
+                    self.mean_train_df,axes=0),np.ones(nsamples),axes=0)
+            sfact = np.tensordot(np.tensordot(np.ones(nfut),\
+                    self.std_train_df,axes=0),np.ones(nsamples),axes=0)
+            return mfact + (sfact*pred_samps)
+        if self.standardised == False:
+            return pred_samps
 
 
     # Subroutine for the 'AR-GP' network
@@ -424,9 +444,9 @@ class bants:
         # Apply standardisation to the training dataframe
         self.train_df = (self.train_df - mean_df)/std_df
         
-        # Store the values in lists for later use in prediction
-        self.mean_train_df.append(mean_df.values)
-        self.std_train_df.append(std_df.values)
+        # Store the values for later use in prediction
+        self.mean_train_df = mean_df.values
+        self.std_train_df = std_df.values
         
         # Store the fact that standardisation has been performed for prediction later
         self.standardised = True
@@ -451,8 +471,8 @@ class bants:
         # Make training data available to class object
         self.train_df = train_df
         
-        # If standardisation is specified then perform this
-        if standard==True: self.standardise()
+        # If standardisation is specified and hasn't already been done then perform this
+        if standard==True and self.standardised==False: self.standardise()
 
         # Find dimensions and number of samples in dataset
         self.Nd = len(train_df.columns)
