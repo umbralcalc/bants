@@ -50,7 +50,7 @@ class bants:
         
         # Set the default maximum number of iterations, the log-evidence tolerance and the optimisation algorithm
         self.itmax = 1000
-        self.lnEtol = 0.05
+        self.lnEtol = 0.0001
         self.optimiser = 'Nelder-Mead' # 'BFGS' is the other choice
 
         # If network type is 'AR-GP' then set kernel types
@@ -111,7 +111,11 @@ class bants:
         delta_t = df.index[1]-df.index[0]
         
         # Generate an array of centred distances to be used to make the window array of the kernel
-        dtimes = delta_t*np.arange(0,self.Ns,1)[::-1]
+        # remembering to account for the offset by one lag to depend only on past values
+        dtimes = delta_t*np.arange(1,self.Ns+1,1)
+        
+        # Compute effective number of timesteps represented by each kernel scale for boundary correction
+        hn_eff = (np.sqrt(hsq)/delta_t).astype(int)
         
         # Create function which returns an array corresponding to the convolution window function for
         # the chosen input kernel type.
@@ -119,14 +123,17 @@ class bants:
             
             # Output weights corresponding to the convolution kernels
             if kern_type == 'SquareExp': return np.exp(-dtimes**2.0/(2.0*hsq))
-            if kern_type == 'Periodic': return np.exp(-2.0*((np.sin(np.abs(np.pi*dtimes/perd)))**2.0)/hsq)
-
-        # Evaluate the convolution on the data dependent on the choice of kernel
-        conv_d = np.asarray([((self.column_kernel_types[i] == 'SquareExp')*np.convolve(df.values[:,i],\
-                 kern_array('SquareExp',hsq[i],self.signal_periods[i]))[:self.Ns]/\
+            if kern_type == 'Periodic': return np.exp(-2.0*((np.sin(np.abs(np.pi*dtimes/perd)))**2.0)/hsq)    
+            
+        # Evaluate the convolution on the data dependent on the choice of kernel with early boundary correction
+        # and remembering to account for the offset by one lag to depend only on past values
+        conv_d = np.asarray([((self.column_kernel_types[i] == 'SquareExp')*np.convolve(np.append(df.values[0,i]*\
+                 np.ones(hn_eff[i]),df.values[:,i]),kern_array('SquareExp',hsq[i],\
+                 self.signal_periods[i]))[hn_eff[i]-1:self.Ns+hn_eff[i]-1]/\
                  np.sum(kern_array('SquareExp',hsq[i],self.signal_periods[i]))) + \
-                 ((self.column_kernel_types[i] == 'Periodic')*np.convolve(df.values[:,i],\
-                 kern_array('Periodic',hsq[i],self.signal_periods[i]))[:self.Ns]/\
+                 ((self.column_kernel_types[i] == 'Periodic')*np.convolve(np.append(df.values[0,i]*\
+                 np.ones(hn_eff[i]),df.values[:,i]),kern_array('Periodic',hsq[i],\
+                 self.signal_periods[i]))[hn_eff[i]-1:self.Ns+hn_eff[i]-1]/\
                  np.sum(kern_array('Periodic',hsq[i],self.signal_periods[i]))) for i in range(0,self.Nd)]).T
         
         # Return convolved signals
@@ -161,7 +168,11 @@ class bants:
         delta_t = df.index[1]-df.index[0]
         
         # Generate an array of centred distances to be used to make the window array of the kernel
-        dtimes = delta_t*np.arange(0,self.Ns,1)[::-1]
+        # remembering to account for the offset by one lag to depend only on past values
+        dtimes = delta_t*np.arange(1,self.Ns+1,1)
+        
+        # Compute effective number of timesteps represented by each kernel scale for boundary correction
+        hn_eff = (np.sqrt(hsq)/delta_t).astype(int)
         
         # Create function which returns an array corresponding to the convolution window function for
         # the chosen input kernel type.
@@ -188,20 +199,24 @@ class bants:
             if kern_type == 'Periodic': return (2.0*((np.sin(np.abs(np.pi*dtimes/perd)))**2.0)/(hsq*hsq))*\
                                                 np.exp(-2.0*((np.sin(np.abs(np.pi*dtimes/perd)))**2.0)/hsq)
 
-        # Evaluate the convolution on the data dependent on the choice of kernel
-        conv_d = np.asarray([((self.column_kernel_types[i] == 'SquareExp')*np.convolve(df.values[:,i],\
-                 kern_array('SquareExp',hsq[i],self.signal_periods[i]))[:self.Ns]/\
+        # Evaluate the convolution on the data dependent on the choice of kernel with early boundary correction
+        # and remembering to account for the offset by one lag to depend only on past values
+        conv_d = np.asarray([((self.column_kernel_types[i] == 'SquareExp')*np.convolve(np.append(df.values[0,i]*\
+                 np.ones(hn_eff[i]),df.values[:,i]),kern_array('SquareExp',hsq[i],\
+                 self.signal_periods[i]))[hn_eff[i]-1:self.Ns+hn_eff[i]-1]/\
                  np.sum(kern_array('SquareExp',hsq[i],self.signal_periods[i]))) + \
-                 ((self.column_kernel_types[i] == 'Periodic')*np.convolve(df.values[:,i],\
-                 kern_array('Periodic',hsq[i],self.signal_periods[i]))[:self.Ns]/\
+                 ((self.column_kernel_types[i] == 'Periodic')*np.convolve(np.append(df.values[0,i]*\
+                 np.ones(hn_eff[i]),df.values[:,i]),kern_array('Periodic',hsq[i],\
+                 self.signal_periods[i]))[hn_eff[i]-1:self.Ns+hn_eff[i]-1]/\
                  np.sum(kern_array('Periodic',hsq[i],self.signal_periods[i]))) for i in range(0,self.Nd)]).T
         
         # Evaluate the first derivative of convolution on the data dependent on the choice of kernel
-        Dconv_d_u = np.asarray([((self.column_kernel_types[i] == 'SquareExp')*np.convolve(df.values[:,i],\
-                    Dkern_array_unnorm('SquareExp',hsq[i],self.signal_periods[i]))[:self.Ns]/\
-                    np.sum(kern_array('SquareExp',hsq[i],self.signal_periods[i]))) + \
-                    ((self.column_kernel_types[i] == 'Periodic')*np.convolve(df.values[:,i],\
-                    Dkern_array_unnorm('Periodic',hsq[i],self.signal_periods[i]))[:self.Ns]/\
+        Dconv_d_u = np.asarray([((self.column_kernel_types[i] == 'SquareExp')*np.convolve(np.append(df.values[0,i]*\
+                    np.ones(hn_eff[i]),df.values[:,i]),Dkern_array_unnorm('SquareExp',hsq[i],\
+                    self.signal_periods[i]))[hn_eff[i]-1:self.Ns+hn_eff[i]-1]/np.sum(kern_array('SquareExp',hsq[i],\
+                    self.signal_periods[i]))) + ((self.column_kernel_types[i] == 'Periodic')*\
+                    np.convolve(np.append(df.values[0,i]*np.ones(hn_eff[i]),df.values[:,i]),\
+                    Dkern_array_unnorm('Periodic',hsq[i],self.signal_periods[i]))[hn_eff[i]-1:self.Ns+hn_eff[i]-1]/\
                     np.sum(kern_array('Periodic',hsq[i],self.signal_periods[i]))) for i in range(0,self.Nd)]).T
         DlnHn_h = np.asarray([((self.column_kernel_types[i] == 'SquareExp')*np.sum(Dkern_array_unnorm('SquareExp',\
                   hsq[i],self.signal_periods[i]))/np.sum(kern_array('SquareExp',hsq[i],self.signal_periods[i]))) + \
@@ -215,15 +230,12 @@ class bants:
     
     
     # Function to output random posterior prediction samples corresponding to the the 'AR-GP' network 
-    def pred_ARGP_sampler(self,ftime,nsamples):
+    def pred_ARGP_sampler(self,nsamples):
         '''
         Function which generates posterior predictive samples for the N-dimensional time series using the 
         'AR-GP' network, where its hyperparameters have been optimised by applying bants.fit to a dataframe. 
 
         INPUT:
-
-        ftime        -     This is the timepoint (in units of the index of the train_df) for the forecast 
-                           to run up to from the training data endpoint.
         
         nsamples     -     This is the number of random predictive samples to request for at each timestep.
         
@@ -233,9 +245,9 @@ class bants:
                            of dimensions in the vector time series.
         
         '''
-        # Compute the number of timesteps to predict over from ftime
+        # Compute the number of timesteps to predict over from bants.ftime
         delta_t = self.train_df.index[1]-self.train_df.index[0]
-        nfut = int(np.ceil((ftime-self.train_df.index[-1])/delta_t))
+        nfut = int(np.ceil((self.ftime-self.train_df.index[-1])/delta_t))
         
         # Extract optimised hyperparameters
         hsq_opt = self.params['hsq']
@@ -353,8 +365,6 @@ class bants:
             self.info['n_evaluations'] = res.num_objective_evaluations.numpy()
             self.info['lnE_val'] = -res.objective_value.numpy()
             
-            # Store the posterior prediction sampler with optimised hyperparameters
-            self.results['sampler'] = self.pred_ARGP_sampler
 
         # Or the BFGS algorithm...
         if self.optimiser == 'BFGS':
@@ -418,8 +428,8 @@ class bants:
             # Run BFGS algorithm and obtain result with scipy optimiser
             # (tfp lbfgs optimiser didn't seem to work for some reason)
             init_params = np.append(np.log(self.hsq_guess),self.Psi_tril_guess)
-            res = spo.minimize(func_to_opt, init_params, method='BFGS', jac=Dfunc_to_opt, \
-                               options={'gtol': self.lnEtol, 'maxiter': self.itmax})
+            res = spo.minimize(func_to_opt, init_params, method='L-BFGS-B', jac=Dfunc_to_opt, \
+                               options={'ftol': self.lnEtol, 'maxiter': self.itmax})
     
             # Output results of optimisation to bants.params dictionary
             self.params['hsq'] = np.exp(res.x[:self.Nd])
@@ -429,9 +439,6 @@ class bants:
             self.info['converged'] = res.success
             self.info['n_evaluations'] = res.nit
             self.info['lnE_val'] = -res.fun
-            
-            # Store the posterior prediction sampler with optimised hyperparameters
-            self.results['sampler'] = self.pred_ARGP_sampler
             
 
     # Standardisation procedure of the training data
@@ -510,14 +517,14 @@ class bants:
                            dataframe of the same form as 'train_df' in the 'fit' method.
                        
         '''
+        # Set future timepoint for prediction generally in class
+        self.ftime = ftime
+        
         # Make prediction times and possible testing data available to class object
-        self.predict_times = times
         if validate is not None: self.test_df = validate
-            
-        # Compute the number of timesteps to predict over from ftime
-        delta_t = self.train_df.index[1]-self.train_df.index[0]
-        nfut = int(np.ceil((ftime-self.train_df.index[-1])/delta_t))
         
+        # If 'AR-GP' network then set the appropriate predictive sampler
+        if self.net_type == 'AR-GP':            
+            # Store the posterior prediction sampler with optimised hyperparameters
+            self.results['sampler'] = self.pred_ARGP_sampler
         
-        #if self.standardised == True:
-
