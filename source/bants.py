@@ -501,27 +501,19 @@ class bants:
 
 
     # Method of 'predict' is analogous to the scikit-learn pattern
-    def predict(self,ftime,validate=None):
+    def predict(self,ftime):
         '''
-        Method to make posterior predictions for the N-dimensional time series using the fitted 'bants' network. All of 
-        the results from the prediction, including a future point sampler and potentially the results of the 
-        cross-validation against the testing data (if this was provided) can be found in the bants.results dictionary.
+        Method to make posterior predictions for the N-dimensional time series using the fitted 'bants' network. The 
+        the result from the prediction is a future point sampler which can be found in the bants.results dictionary.
 
         INPUT:
         
         ftime        -     This is the timepoint (in units of the index of the train_df) for the forecast 
                            to generate predictive distributions up to from the training data endpoint. 
-
-        validate     -     (Optional) One can input a dataframe representing the testing data of the vector time series 
-                           process to cross-validate the 'bants' predictions against. Simply set this to be a pandas 
-                           dataframe of the same form as 'train_df' in the 'fit' method.
                        
         '''
         # Set future timepoint for prediction generally in class
         self.ftime = ftime
-        
-        # Make prediction times and possible testing data available to class object
-        if validate is not None: self.test_df = validate
         
         # If 'AR-GP' network then set the appropriate predictive sampler
         if self.net_type == 'AR-GP':            
