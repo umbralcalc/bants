@@ -2,8 +2,8 @@
 BANTS - BAyesian Networks for Time Series forecasting
 
 This is the main 'bants' class to be used on generic N-dimensional datasets. The structure is intended to be as simple
-as possible for rapid use in a commerical data science context. For more details on the mathematics behind 'bants'
-please refer to the notes/how_bants_works.ipynb Jupyter Notebook in the Git repository. 
+as possible for rapid use in a generic data science context. For more details on the mathematics behind 'bants'
+please refer to the notes/theory-notes.ipynb Jupyter Notebook in the Git repository. 
 
 Note that due to speed requirements, 'bants' takes as input only time series data that are measured at equally-spaced 
 time intervals - this is due to the fact that the kernel convolutions are much faster with a constant window function.
@@ -11,8 +11,6 @@ time intervals - this is due to the fact that the kernel convolutions are much f
 """
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-import tensorflow_probability as tfp
 import scipy.special as sps
 import scipy.optimize as spo
 import scipy.stats as spst
@@ -398,7 +396,7 @@ class bants:
     # Subroutine for the 'AR-GP' network
     def optimise_ARGP_hyperp(self, df):
         """
-        Method to optimise the 'AG-GP' network hyperparameters as defined in notes/how_bants_works.ipynb.
+        Method to optimise the 'AG-GP' network hyperparameters as defined in notes/theory-notes.ipynb.
         Optimisation outputs are written to bants.params and bants.info accordingly.
     
         INPUT:
@@ -432,136 +430,93 @@ class bants:
             Mt = self.kconv(df, self.hsq_guess)
             self.Psi_tril_guess = np.cov(Mt.T)[np.tril_indices(self.Nd)]
 
-        # With initial guesses for the parameters implement optimisation with bants.itmax as the maximum
-        # number of iterations permitted for the algorithm and bants.lnEtol as the log-evidence tolerance.
-        # Options are the Nelder-Mead algorithm...
-        if self.optimiser == "Nelder-Mead":
+        # Define the function to optimise over to obtain optimal network hyperparameters if Nelder-Mead
+        def func_to_opt(params, df=df, N=self.Nd):
 
-            # Define the function to optimise over to obtain optimal network hyperparameters if Nelder-Mead
-            def func_to_opt(params, df=df, N=self.Nd):
+            # Extract hyperparameters
+            hsq = np.exp(
+                params[:N]
+            )  # Choose log space for hsq for scaling and to avoid negative values
+            Psi = np.zeros((N, N))
+            Psi[np.tril_indices(N)] = params[N:]
 
-                # Extract hyperparameters
-                hsq = np.exp(
-                    params[:N]
-                )  # Choose log space for hsq for scaling and to avoid negative values
-                Psi = np.zeros((N, N))
-                Psi[np.tril_indices(N)] = params[N:]
+            # Psi is symmetric
+            Psi = Psi + Psi.T - np.diag(Psi.diagonal())
 
-                # Psi is symmetric
-                Psi = Psi + Psi.T - np.diag(Psi.diagonal())
+            # Compute the kernel-convolved signal for each data point
+            Mt = self.kconv(df, hsq)
 
-                # Compute the kernel-convolved signal for each data point
-                Mt = self.kconv(df, hsq)
+            # Compute the scale matrix
+            Sm = Psi / (self.nu - N + 1.0)
 
-                # Compute the scale matrix
-                Sm = Psi / (self.nu - N + 1.0)
+            # Sum log-evidence contributions by each data point
+            lnE = np.sum(self.tD_logpdf(df, self.nu - N + 1.0, Mt, Sm), axis=0)
 
-                # Sum log-evidence contributions by each data point
-                lnE = np.sum(self.tD_logpdf(df, self.nu - N + 1.0, Mt, Sm), axis=0)
+            # Output corresponding value to minimise
+            return -lnE
 
-                # Output corresponding value to minimise
-                return -lnE
+        # Define the gradient of the function to optimise over to obtain optimal network hyperparameters if BFGS
+        def Dfunc_to_opt(params, df=df, N=self.Nd):
 
-            # Run Nelder-Mead algorithm and obtain result
-            init_params = tf.constant(
-                np.append(np.log(self.hsq_guess), self.Psi_tril_guess)
+            # Extract hyperparameters
+            hsq = np.exp(
+                params[:N]
+            )  # Choose log space for hsq for scaling and to avoid negative values
+            Psi = np.zeros((N, N))
+            Psi[np.tril_indices(N)] = params[N:]
+
+            # Psi is symmetric
+            Psi = Psi + Psi.T - np.diag(Psi.diagonal())
+
+            # Compute the kernel-convolved signal and its first derivative for each data point
+            Mt, DMt = self.kconv_and_deriv(df, hsq)
+
+            # Compute the gradient values
+            x_minus_mu = df.values - Mt
+            inversePsi = np.linalg.inv(Psi)
+            inversePsisq = np.matmul(inversePsi, inversePsi)
+            vect = np.tensordot(inversePsi, x_minus_mu, axes=([0], [1]))
+            contraction = np.sum(x_minus_mu.T * vect, axis=0)
+            DlnE = np.zeros_like(params)
+            # Multiplying by hsq here for logarithmic derivative
+            DlnE[:N] = -hsq * np.sum(
+                (self.nu + 1.0)
+                * DMt.T
+                * vect
+                / np.tensordot(np.ones(N), 1.0 + contraction, axes=0),
+                axis=1,
             )
-            res = tfp.optimizer.nelder_mead_minimize(
-                func_to_opt,
-                initial_vertex=init_params,
-                max_iterations=self.itmax,
-                func_tolerance=self.lnEtol,
-            )
-
-            # Output results of optimisation to bants.params dictionary
-            self.params["hsq"] = np.exp(res.position[: self.Nd].numpy())
-            self.params["Psi_tril"] = res.position[self.Nd :].numpy()
-
-            # Output fitting information to bants.info dictionary
-            self.info["converged"] = res.converged.numpy()
-            self.info["n_evaluations"] = res.num_objective_evaluations.numpy()
-            self.info["lnE_val"] = -res.objective_value.numpy()
-
-        # Or the BFGS algorithm...
-        if self.optimiser == "BFGS":
-
-            # Define the function to optimise over to obtain optimal network hyperparameters if Nelder-Mead
-            def func_to_opt(params, df=df, N=self.Nd):
-
-                # Extract hyperparameters
-                hsq = np.exp(
-                    params[:N]
-                )  # Choose log space for hsq for scaling and to avoid negative values
-                Psi = np.zeros((N, N))
-                Psi[np.tril_indices(N)] = params[N:]
-
-                # Psi is symmetric
-                Psi = Psi + Psi.T - np.diag(Psi.diagonal())
-
-                # Compute the kernel-convolved signal for each data point
-                Mt = self.kconv(df, hsq)
-
-                # Compute the scale matrix
-                Sm = Psi / (self.nu - N + 1.0)
-
-                # Sum log-evidence contributions by each data point
-                lnE = np.sum(self.tD_logpdf(df, self.nu - N + 1.0, Mt, Sm), axis=0)
-
-                # Output corresponding value to minimise
-                return -lnE
-
-            # Define the gradient of the function to optimise over to obtain optimal network hyperparameters if BFGS
-            def Dfunc_to_opt(params, df=df, N=self.Nd):
-
-                # Extract hyperparameters
-                hsq = np.exp(
-                    params[:N]
-                )  # Choose log space for hsq for scaling and to avoid negative values
-                Psi = np.zeros((N, N))
-                Psi[np.tril_indices(N)] = params[N:]
-
-                # Psi is symmetric
-                Psi = Psi + Psi.T - np.diag(Psi.diagonal())
-
-                # Compute the kernel-convolved signal and its first derivative for each data point
-                Mt, DMt = self.kconv_and_deriv(df, hsq)
-
-                # Compute the gradient values
-                x_minus_mu = df.values - Mt
-                inversePsi = np.linalg.inv(Psi)
-                inversePsisq = np.matmul(inversePsi, inversePsi)
-                vect = np.tensordot(inversePsi, x_minus_mu, axes=([0], [1]))
-                contraction = np.sum(x_minus_mu.T * vect, axis=0)
-                DlnE = np.zeros_like(params)
-                # Multiplying by hsq here for logarithmic derivative
-                DlnE[:N] = -hsq * np.sum(
-                    (self.nu + 1.0)
-                    * DMt.T
-                    * vect
-                    / np.tensordot(np.ones(N), 1.0 + contraction, axes=0),
+            DlnE[N:] = -0.5 * np.identity(N)[np.tril_indices(N)] + (
+                ((self.nu + 1.0) / 2.0)
+                * np.sum(
+                    x_minus_mu[:, np.tril_indices(N)[0]].T
+                    * np.tensordot(
+                        inversePsisq[np.tril_indices(N)], np.ones(self.Ns), axes=0
+                    )
+                    * x_minus_mu[:, np.tril_indices(N)[1]].T
+                    / np.tensordot(np.ones_like(params[N:]), 1.0 + contraction, axes=0),
                     axis=1,
                 )
-                DlnE[N:] = -0.5 * np.identity(N)[np.tril_indices(N)] + (
-                    ((self.nu + 1.0) / 2.0)
-                    * np.sum(
-                        x_minus_mu[:, np.tril_indices(N)[0]].T
-                        * np.tensordot(
-                            inversePsisq[np.tril_indices(N)], np.ones(self.Ns), axes=0
-                        )
-                        * x_minus_mu[:, np.tril_indices(N)[1]].T
-                        / np.tensordot(
-                            np.ones_like(params[N:]), 1.0 + contraction, axes=0
-                        ),
-                        axis=1,
-                    )
-                )
+            )
 
-                # Output corresponding value to minimise and its gradient
-                return -DlnE
+            # Output corresponding value to minimise and its gradient
+            return -DlnE
 
-            # Run BFGS algorithm and obtain result with scipy optimiser
-            # (tfp lbfgs optimiser didn't seem to work for some reason)
-            init_params = np.append(np.log(self.hsq_guess), self.Psi_tril_guess)
+        # With initial guesses for the parameters implement optimisation with bants.itmax as the maximum
+        # number of iterations permitted for the algorithm and bants.lnEtol as the log-evidence tolerance.
+        init_params = np.append(np.log(self.hsq_guess), self.Psi_tril_guess)
+
+        # Run Nelder-Mead algorithm and obtain result with scipy optimiser
+        if self.optimiser == "Nelder-Mead":
+            res = spo.minimize(
+                func_to_opt,
+                init_params,
+                method="Nelder-Mead",
+                options={"ftol": self.lnEtol, "maxiter": self.itmax},
+            )
+
+        # Run BFGS algorithm and obtain result with scipy optimiser
+        if self.optimiser == "BFGS":
             res = spo.minimize(
                 func_to_opt,
                 init_params,
@@ -570,14 +525,14 @@ class bants:
                 options={"ftol": self.lnEtol, "maxiter": self.itmax},
             )
 
-            # Output results of optimisation to bants.params dictionary
-            self.params["hsq"] = np.exp(res.x[: self.Nd])
-            self.params["Psi_tril"] = res.x[self.Nd :]
+        # Output results of optimisation to bants.params dictionary
+        self.params["hsq"] = np.exp(res.x[: self.Nd])
+        self.params["Psi_tril"] = res.x[self.Nd :]
 
-            # Output fitting information to bants.info dictionary
-            self.info["converged"] = res.success
-            self.info["n_evaluations"] = res.nit
-            self.info["lnE_val"] = -res.fun
+        # Output fitting information to bants.info dictionary
+        self.info["converged"] = res.success
+        self.info["n_evaluations"] = res.nit
+        self.info["lnE_val"] = -res.fun
 
     # Standardisation procedure of the training data
     def standardise(self):
