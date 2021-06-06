@@ -34,8 +34,10 @@ class bants:
         # Set network type
         self.net_type = net_type
 
-        # Initialise empty dictionaries of network parameters to learn, fitting information and prediction results
-        self.params = {}
+        # Initialise empty dictionaries of network parameters to learn (and default hyperparameters of maximum number 
+        # of iterations, log-evidence tolerance and learning rate in the case of gradient descent), the fitting information 
+        # and prediction results
+        self.params = {"itmax" : 1000, "lnEtol" : 0.0001, "learn_rate" : 0.001}
         self.info = {}
         self.results = {}
 
@@ -44,10 +46,8 @@ class bants:
         self.std_train_df = None
         self.standardised = False
 
-        # Set the default maximum number of iterations, the log-evidence tolerance and the optimisation algorithm
-        self.itmax = 1000
-        self.lnEtol = 0.0001
-        self.optimiser = "Nelder-Mead"  # 'BFGS' is the other choice
+        # Set the default optimisation algorithm
+        self.optimiser = "GD"
 
         # If network type is 'AR-GP' then set kernel types
         if self.net_type == "AR-GP":
@@ -168,8 +168,8 @@ class bants:
         """
         Method of kernel convolution on input dataframe values according to whichever kernel types were specified
         in the bants.column_kernel_types list. This method also computes the first derivatives of the convolved 
-        data. This is used mainly in bants.optimise_ARGP_hyperp with the 'BFGS' optimiser but can be used independently 
-        on different dataframes for experimentation.
+        data. This is used mainly in bants.optimise_ARGP_hyperp with the gradient-based optimisers but can be used 
+        independently on different dataframes for experimentation.
     
         INPUT:
     
@@ -404,8 +404,9 @@ class bants:
         df    -     This is the input dataframe of values to optimise the hyperparameters with respect to.
                        
         """
-        # Set the number of degrees of freedom to correspond to correspond to the non-informative prior
-        self.nu = self.Nd
+        # If not already set, then fix the number of degrees of freedom to correspond to the non-informative prior
+        if self.nu is None:
+            self.nu = self.Nd
         self.params["nu"] = self.nu
 
         # If not set make a first guess for h and the lower triangular elements of Psi
@@ -430,7 +431,7 @@ class bants:
             Mt = self.kconv(df, self.hsq_guess)
             self.Psi_tril_guess = np.cov(Mt.T)[np.tril_indices(self.Nd)]
 
-        # Define the function to optimise over to obtain optimal network hyperparameters if Nelder-Mead
+        # Define the function to optimise over to obtain optimal network hyperparameters
         def func_to_opt(params, df=df, N=self.Nd):
 
             # Extract hyperparameters
@@ -455,7 +456,8 @@ class bants:
             # Output corresponding value to minimise
             return -lnE
 
-        # Define the gradient of the function to optimise over to obtain optimal network hyperparameters if BFGS
+        # Define the gradient of the function to optimise over to obtain optimal network hyperparameters
+        # if the chosen optimiser is gradient-based
         def Dfunc_to_opt(params, df=df, N=self.Nd):
 
             # Extract hyperparameters
@@ -502,8 +504,8 @@ class bants:
             # Output corresponding value to minimise and its gradient
             return -DlnE
 
-        # With initial guesses for the parameters implement optimisation with bants.itmax as the maximum
-        # number of iterations permitted for the algorithm and bants.lnEtol as the log-evidence tolerance.
+        # With initial guesses for the parameters implement optimisation with bants.params["itmax"] as the maximum
+        # number of iterations permitted for the algorithm and bants.lnEtol as the log-evidence tolerance
         init_params = np.append(np.log(self.hsq_guess), self.Psi_tril_guess)
 
         # Run Nelder-Mead algorithm and obtain result with scipy optimiser
@@ -512,7 +514,7 @@ class bants:
                 func_to_opt,
                 init_params,
                 method="Nelder-Mead",
-                options={"ftol": self.lnEtol, "maxiter": self.itmax},
+                options={"ftol": self.params["lnEtol"], "maxiter": self.params["itmax"]},
             )
 
         # Run BFGS algorithm and obtain result with scipy optimiser
@@ -522,8 +524,33 @@ class bants:
                 init_params,
                 method="L-BFGS-B",
                 jac=Dfunc_to_opt,
-                options={"ftol": self.lnEtol, "maxiter": self.itmax},
+                options={"ftol": self.params["lnEtol"], "maxiter": self.params["itmax"]},
             )
+
+        # Run the GD algorithm (standard gradient descent) and obtain result
+        if self.optimiser == "GD":
+
+            # Initialise the results object, set the relevant hyperparameters and 
+            # then run the standard gradient descent algorithm
+            res = results_obj(init_params, func_to_opt, self.params["itmax"])
+            lastf = res.fun
+            lr = self.params["learn_rate"]
+            ftol = self.params["lnEtol"]
+            absdiff = ftol + 1.0
+            while ((ftol < absdiff) & (res.nit < self.params["itmax"])) == True:
+
+                # Iterate the loop, parameter and function values
+                res.x -= lr * Dfunc_to_opt(res.x)
+                res.fun = func_to_opt(res.x)
+                res.nit += 1
+
+                # Compute difference in function values for tolerance
+                absdiff = abs((res.fun-lastf) / lastf)
+                lastf = res.fun
+
+            # If specified tolerance was reached then trigger boolean
+            if ftol > absdiff:
+                res.success = True
 
         # Output results of optimisation to bants.params dictionary
         self.params["hsq"] = np.exp(res.x[: self.Nd])
@@ -611,3 +638,11 @@ class bants:
         if self.net_type == "AR-GP":
             # Store the posterior prediction sampler with optimised hyperparameters
             self.results["sampler"] = self.pred_ARGP_sampler
+
+class results_obj:
+    def __init__(self, x, f, itmax):
+        """Define a results object for output"""
+        self.x = x
+        self.fun = f(x)
+        self.nit = 0
+        self.success = False
