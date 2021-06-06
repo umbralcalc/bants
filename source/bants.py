@@ -2,8 +2,8 @@
 BANTS - BAyesian Networks for Time Series forecasting
 
 This is the main 'bants' class to be used on generic N-dimensional datasets. The structure is intended to be as simple
-as possible for rapid use in a generic data science context. For more details on the mathematics behind 'bants'
-please refer to the notes/theory-notes.ipynb Jupyter Notebook in the Git repository. 
+as possible for use in a generic data science context. For more details on the mathematics behind 'bants' please refer
+to the notes/theory-notes.ipynb Jupyter Notebook in the Git repository. 
 
 Note that due to speed requirements, 'bants' takes as input only time series data that are measured at equally-spaced 
 time intervals - this is due to the fact that the kernel convolutions are much faster with a constant window function.
@@ -38,7 +38,7 @@ class bants:
         # Initialise empty dictionaries of network parameters to learn (and default hyperparameters of maximum number 
         # of iterations, log-evidence tolerance and learning rate in the case of gradient descent), the fitting information 
         # and prediction results
-        self.params = {"itmax" : 1000, "lnEtol" : 0.0001, "learn_rate" : 0.001}
+        self.params = {"itmax" : 1000, "lnEtol" : 0.0001, "learn_rate" : 0.01}
         self.info = {}
         self.results = {}
 
@@ -99,16 +99,16 @@ class bants:
         in the bants.column_kernel_types list. This is used mainly in bants.optimise_ARGP_hyperp but can be used
         independently on different dataframes for experimentation.
     
-        INPUT:
-    
-        df       -     This is the input dataframe of values to perform the convolution on.
-    
-        hsq      -     This is an input 1-d array of the same length as the number of columns in the dataframe
-                       containing the square-amplitude of the kernel scales for each time series dimension.
+        Args:
+        df
+            This is the input dataframe of values to perform the convolution on.
+        hsq
+            This is an input 1-d array of the same length as the number of columns in the dataframe
+            containing the square-amplitude of the kernel scales for each time series dimension.
                        
-        OUTPUT:
-    
-        conv_d   -     This is an output array of convolved data the same shape as the input dataframe.
+        Returns:
+        conv_d
+            This is an output array of convolved data the same shape as the input dataframe.
 
         """
         # Extract the change in time from the dataframe
@@ -172,20 +172,21 @@ class bants:
         data. This is used mainly in bants.optimise_ARGP_hyperp with the gradient-based optimisers but can be used 
         independently on different dataframes for experimentation.
     
-        INPUT:
-    
-        df       -     This is the input dataframe of values to perform the convolution on.
-    
-        hsq      -     This is an input 1-d array of the same length as the number of columns in the dataframe
-                       containing the square-amplitude of the kernel scales for each time series dimension.
+        Args:
+        df
+            This is the input dataframe of values to perform the convolution on.
+        hsq
+            This is an input 1-d array of the same length as the number of columns in the dataframe
+            containing the square-amplitude of the kernel scales for each time series dimension.
                        
-        OUTPUT:
-    
-        conv_d   -     This is an output array of convolved data the same shape as the input dataframe.
-        
-        Dconv_d  -     This is an output corresponding to the first derivative of the convolved data. Since the
-                       cross-derivatives of the corresponding Jacobian are zero, this is merely a 1-d array of the
-                       same length as conv_d.
+        Returns:
+        (conv_d, Dconv_d)
+            conv_d
+                This is an output array of convolved data the same shape as the input dataframe. 
+            Dconv_d
+                This is an output corresponding to the first derivative of the convolved data. Since the
+                cross-derivatives of the corresponding Jacobian are zero, this is merely a 1-d array of the
+                same length as conv_d.
 
         """
         # Extract the change in time from the dataframe
@@ -313,23 +314,28 @@ class bants:
         ).T
         Dconv_d = Dconv_d_u - (DlnHn_h * conv_d)
 
-        # Return convolved signals
+        # Return convolved signals in a tuple
         return conv_d, Dconv_d
 
-    # Function to output random posterior prediction samples corresponding to the the 'AR-GP' network
-    def pred_ARGP_sampler(self, nsamples):
+    # Function to output random prediction samples corresponding to the the 'AR-GP' network
+    def pred_ARGP_sampler(self, nsamples, compute_map=True):
         """
-        Function which generates posterior predictive samples for the N-dimensional time series using the 
-        'AR-GP' network, where its hyperparameters have been optimised by applying bants.fit to a dataframe. 
+        Function which generates (posterior or MAP - MAP is default) predictive samples for the N-dimensional 
+        time series using the 'AR-GP' network, where its hyperparameters have been optimised by applying 
+        bants.fit to a dataframe. 
 
-        INPUT:
+        Args:
+        nsamples
+            This is the number of random predictive samples to request for at each timestep.
         
-        nsamples     -     This is the number of random predictive samples to request for at each timestep.
+        Returns: 
+        pred_samps
+            This is an output array of dimensions (nfut,dim,nsamples), where dim is the number
+            of dimensions in the vector time series.
         
-        OUTPUT:
-        
-        pred_samps   -     This is an output array of dimensions (nfut,dim,nsamples), where dim is the number
-                           of dimensions in the vector time series.
+        Keywords:
+        compute_map
+            If True (which is the default) then compute the predictions with the MAP of the network.
         
         """
         # Compute the number of timesteps to predict over from bants.ftime
@@ -344,17 +350,24 @@ class bants:
         # Psi is symmetric
         Psi_opt = Psi_opt + Psi_opt.T - np.diag(Psi_opt.diagonal())
 
-        # Generate future timepoints, storage for predictions and loop over samples (slow, I know)
+        # Generate future timepoints and storage for predictions
         indices = np.asarray(
             [(float(nf) * delta_t) + self.train_df.index[-1] for nf in range(0, nfut)]
         )
         pred_samps = np.empty((nfut, self.Nd, 0))
+        
+        # Loop over samples (very slow at the moment) (this is a slow method with numpy/scipy and hence
+        # will need to be customised in future to get more speed)
         for ns in range(0, nsamples):
 
-            # Generate random covariance matrix from inverse-Wishart with optimal hyperparameters
-            Sigt = spst.invwishart.rvs(df=self.nu, scale=Psi_opt)
+            # Get the mode of the inverse-Wishart distribution if computing the MAP prediction
+            if compute_map:
+                Sigt = Psi_opt / (self.nu + self.Nd + 1.0)
+            else:
+                # Generate random covariance matrix from inverse-Wishart with optimal hyperparameters
+                Sigt = spst.invwishart.rvs(df=self.nu, scale=Psi_opt)
 
-            # Loop over future timepoints and generate samples from the 'AR-GP' network iteratively (slow, I know)
+            # Loop over future timepoints and generate samples from the 'AR-GP' network iteratively
             out = [
                 np.random.multivariate_normal(
                     self.kconv(self.train_df, hsq_opt)[-1], Sigt
@@ -400,9 +413,9 @@ class bants:
         Method to optimise the 'AG-GP' network hyperparameters as defined in notes/theory-notes.ipynb.
         Optimisation outputs are written to bants.params and bants.info accordingly.
     
-        INPUT:
-    
-        df    -     This is the input dataframe of values to optimise the hyperparameters with respect to.
+        Args:
+        df
+            This is the input dataframe of values to optimise the hyperparameters with respect to.
                        
         """
         # If not already set, then fix the number of degrees of freedom to correspond to the non-informative prior
@@ -533,7 +546,7 @@ class bants:
 
             # Initialise the results object, set the relevant hyperparameters and 
             # then run the standard gradient descent algorithm
-            res = results_obj(init_params, func_to_opt, self.params["itmax"])
+            res = results_obj(init_params, func_to_opt)
             lastf = res.fun
             lr = self.params["learn_rate"]
             ftol = self.params["lnEtol"]
@@ -541,7 +554,7 @@ class bants:
             while ((ftol < absdiff) & (res.nit < self.params["itmax"])) == True:
 
                 # Iterate the loop, parameter and function values
-                res.x -= lr * Dfunc_to_opt(res.x)
+                res.x -= lr * Dfunc_to_opt(res.x) / float(self.Ns)
                 res.fun = func_to_opt(res.x)
                 res.nit += 1
 
@@ -586,13 +599,14 @@ class bants:
         hyperparameters of the network. Learned network parameters can be found in the bants.params dictionary. Fitting 
         information can be found in the bants.info dictionary.
 
-        INPUT:
+        Args:
+        train_df
+            This is an input dataframe representing the training data of the vector time series process 
+            that one wishes to model. Simply set this to be a pandas dataframe with time as the index.
 
-        train_df     -     This is an input dataframe representing the training data of the vector time series process 
-                           that one wishes to model. Simply set this to be a pandas dataframe with time as the index.
-                       
-        standard     -     (Optional) Boolean to specify if the input data is standardised prior to fitting or not. The
-                           default option is 'True'.
+        Keywords:            
+        standard
+            Boolean to specify if the input data is standardised prior to fitting or not. The default is 'True'.
                        
         """
         # Make training data available to class object
@@ -623,13 +637,13 @@ class bants:
     # Method of 'predict' is analogous to the scikit-learn pattern
     def predict(self, ftime):
         """
-        Method to make posterior predictions for the N-dimensional time series using the fitted 'bants' network. The 
-        the result from the prediction is a future point sampler which can be found in the bants.results dictionary.
+        Method to make predictions for the N-dimensional time series using the fitted 'bants' network. The 
+        result from the prediction is a future point sampler which can be found in the bants.results dictionary.
 
-        INPUT:
-        
-        ftime        -     This is the timepoint (in units of the index of the train_df) for the forecast 
-                           to generate predictive distributions up to from the training data endpoint. 
+        Args:
+        ftime
+            This is the timepoint (in units of the index of the train_df) for the forecast 
+            to generate predictive distributions up to from the training data endpoint. 
                        
         """
         # Set future timepoint for prediction generally in class
@@ -637,11 +651,11 @@ class bants:
 
         # If 'AR-GP' network then set the appropriate predictive sampler
         if self.net_type == "AR-GP":
-            # Store the posterior prediction sampler with optimised hyperparameters
+            # Store the prediction sampler with optimised hyperparameters
             self.results["sampler"] = self.pred_ARGP_sampler
 
 class results_obj:
-    def __init__(self, x, f, itmax):
+    def __init__(self, x, f):
         """Define a results object for output"""
         self.x = x
         self.fun = f(x)
