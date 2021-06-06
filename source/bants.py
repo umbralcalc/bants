@@ -9,6 +9,7 @@ Note that due to speed requirements, 'bants' takes as input only time series dat
 time intervals - this is due to the fact that the kernel convolutions are much faster with a constant window function.
 
 """
+
 import numpy as np
 import pandas as pd
 import scipy.special as sps
