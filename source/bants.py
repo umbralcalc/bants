@@ -3,10 +3,7 @@ BANTS - BAyesian Networks for Time Series forecasting
 
 This is the main 'bants' class to be used on generic N-dimensional datasets. The structure is intended to be as simple
 as possible for use in a generic data science context. For more details on the mathematics behind 'bants' please refer
-to the notes/theory-notes.ipynb Jupyter Notebook in the Git repository. 
-
-Note that due to speed requirements, 'bants' takes as input only time series data that are measured at equally-spaced 
-time intervals - this is due to the fact that the kernel convolutions are much faster with a constant window function.
+to the notes/theory-notes.ipynb Jupyter Notebook in the Git repository.
 
 """
 
@@ -64,6 +61,24 @@ class bants:
             # Initial params and guesses for optimiser of the hyperparameters of the network
             self.nu = None
             self.hsq_guess = None
+            self.Psi_tril_guess = None
+
+        # If network type if 'KM-GP' then import k-means clustering from tslearn and setup
+        if self.net_type == "KM-GP":
+            from tslearn.clustering import TimeSeriesKMeans
+
+            # Initialise the k-means clustering method and hyperparameters
+            self.tsk = None
+            self.TimeSeriesKMeans = TimeSeriesKMeans
+            self.params["kmeans_nclus"] = None
+            self.params["kmeans_max_iter"] = 10
+            self.params["kmeans_random_state"] = 42
+            self.results["kmeans_clust_cent"] = None
+
+            # Initial params and guesses for optimiser of the hyperparameters of the network
+            self.nu = None
+            self.u_guess = None
+            self.U_flat_guess = None
             self.Psi_tril_guess = None
 
     # Function to output multivariate t-distribution (see here: https://en.wikipedia.org/wiki/Multivariate_t-distribution)
@@ -410,7 +425,7 @@ class bants:
     # Subroutine for the 'AR-GP' network
     def optimise_ARGP_hyperp(self, df):
         """
-        Method to optimise the 'AG-GP' network hyperparameters as defined in notes/theory-notes.ipynb.
+        Method to optimise the 'AR-GP' network hyperparameters as defined in notes/theory-notes.ipynb.
         Optimisation outputs are written to bants.params and bants.info accordingly.
     
         Args:
@@ -519,7 +534,7 @@ class bants:
             return -DlnE
 
         # With initial guesses for the parameters implement optimisation with bants.params["itmax"] as the maximum
-        # number of iterations permitted for the algorithm and bants.lnEtol as the log-evidence tolerance
+        # number of iterations permitted for the algorithm and bants.params["lnEtol"] as the log-evidence tolerance
         init_params = np.append(np.log(self.hsq_guess), self.Psi_tril_guess)
 
         # Run Nelder-Mead algorithm and obtain result with scipy optimiser
@@ -575,6 +590,174 @@ class bants:
         self.info["n_evaluations"] = res.nit
         self.info["lnE_val"] = -res.fun
 
+    # Subroutine for the 'KM-GP' network
+    def optimise_KMGP_hyperp(self, df):
+        """
+        Method to optimise the 'KM-GP' network hyperparameters as defined in notes/theory-notes.ipynb.
+        Optimisation outputs are written to bants.params and bants.info accordingly.
+    
+        Args:
+        df
+            This is the input dataframe of values to optimise the hyperparameters with respect to.
+                       
+        """
+        # If not already set, then fix the number of degrees of freedom to correspond to the non-informative prior
+        if self.nu is None:
+            self.nu = self.Nd
+        self.params["nu"] = self.nu
+
+        # If not set make a first guess for u and the lower triangular elements of U and Psi
+        if self.u_guess is None:
+            self.u_guess = np.zeros(self.Nd)
+        if self.U_flat_guess is None:
+            self.U_flat_guess = np.random.uniform(0, 1, size=int(self.Nc * self.Nd))
+            self.U_flat_guess = self.U_flat_guess / np.sum(self.U_flat_guess)
+        if self.Psi_tril_guess is None:
+            vals = np.random.uniform(0, 1, size=(self.Nd, self.Ns))
+            self.Psi_tril_guess = np.cov(vals)[np.tril_indices(self.Nd)]
+
+        # Define the function to optimise over to obtain optimal network hyperparameters
+        def func_to_opt(params, df=df, N=self.Nd, Nc=self.Nc):
+
+            # Extract hyperparameters
+            u = params[:N]
+            U = params[N:N + (Nc * N)].reshape((Nc, N))
+            Psi = np.zeros((N, N))
+            Psi[np.tril_indices(N)] = params[N + (Nc * N):]
+
+            # Psi is symmetric
+            Psi = Psi + Psi.T - np.diag(Psi.diagonal())
+
+            # Calculate the mean for each data point using k-means and the network parameters
+            mt = self.results["standardised_kmeans_clust_cent"]
+            Mt = np.tensordot(mt, U, axes=([1], [0])) + np.tensordot(np.ones(self.Ns), u, axes=0)
+
+            # Compute the scale matrix
+            Sm = Psi / (self.nu - N + 1.0)
+
+            # Sum log-evidence contributions by each data point
+            lnE = np.sum(self.tD_logpdf(df, self.nu - N + 1.0, Mt, Sm), axis=0)
+
+            # Output corresponding value to minimise
+            return -lnE
+
+        # Get the flattened U indices for convenient indexing in the first derivatives 
+        iflat = np.tensordot(np.arange(0, self.Nc, 1), np.ones(self.Nd), axes=0).astype(int).flatten()
+        jflat = np.tensordot(np.ones(self.Nc), np.arange(0, self.Nd, 1), axes=0).astype(int).flatten()
+
+        # Define the gradient of the function to optimise over to obtain optimal network hyperparameters
+        # if the chosen optimiser is gradient-based
+        def Dfunc_to_opt(params, df=df, N=self.Nd, Nc=self.Nc, iflat=iflat, jflat=jflat):
+
+            # Extract hyperparameters
+            u = params[:N]
+            U = params[N:N + (Nc * N)].reshape((Nc, N))
+            Psi = np.zeros((N, N))
+            Psi[np.tril_indices(N)] = params[N + (Nc * N):]
+
+            # Psi is symmetric
+            Psi = Psi + Psi.T - np.diag(Psi.diagonal())
+
+            # Calculate the mean for each data point using k-means and the network parameters
+            mt = self.results["standardised_kmeans_clust_cent"]
+            Mt = np.tensordot(mt, U, axes=([1], [0])) + np.tensordot(np.ones(self.Ns), u, axes=0)
+
+            # Compute the gradient values
+            x_minus_mu = df.values - Mt
+            inversePsi = np.linalg.inv(Psi)
+            inversePsisq = np.matmul(inversePsi, inversePsi)
+            vect = np.tensordot(inversePsi, x_minus_mu, axes=([0], [1]))
+            contraction = np.sum(x_minus_mu.T * vect, axis=0)
+            DlnE = np.zeros_like(params)
+            DlnE[:N] = - np.sum(
+                (self.nu + 1.0)
+                * vect
+                / np.tensordot(np.ones(N), 1.0 + contraction, axes=0),
+                axis=1,
+            )
+            DlnE[N:N + (Nc * N)] = - np.sum(
+                (self.nu + 1.0)
+                * mt.T[iflat]
+                * vect[jflat] 
+                / np.tensordot(np.ones(Nc * N), 1.0 + contraction, axes=0),
+                axis=1,
+            )
+            DlnE[N + (Nc * N):] = -0.5 * np.identity(N)[np.tril_indices(N)] + (
+                ((self.nu + 1.0) / 2.0)
+                * np.sum(
+                    x_minus_mu[:, np.tril_indices(N)[0]].T
+                    * np.tensordot(
+                        inversePsisq[np.tril_indices(N)], np.ones(self.Ns), axes=0
+                    )
+                    * x_minus_mu[:, np.tril_indices(N)[1]].T
+                    / np.tensordot(
+                        np.ones_like(params[N + (Nc * N):]), 1.0 + contraction, axes=0
+                    ),
+                    axis=1,
+                )
+            )
+
+            # Output corresponding value to minimise and its gradient
+            return -DlnE
+
+        # With initial guesses for the parameters implement optimisation with bants.params["itmax"] as the maximum
+        # number of iterations permitted for the algorithm and bants.params["lnEtol"] as the log-evidence tolerance
+        init_params = np.append(np.append(self.u_guess, self.U_flat_guess), self.Psi_tril_guess)
+
+        # Run Nelder-Mead algorithm and obtain result with scipy optimiser
+        if self.optimiser == "Nelder-Mead":
+            res = spo.minimize(
+                func_to_opt,
+                init_params,
+                method="Nelder-Mead",
+                options={"ftol": self.params["lnEtol"], "maxiter": self.params["itmax"]},
+            )
+
+        # Run BFGS algorithm and obtain result with scipy optimiser
+        if self.optimiser == "BFGS":
+            res = spo.minimize(
+                func_to_opt,
+                init_params,
+                method="L-BFGS-B",
+                jac=Dfunc_to_opt,
+                options={"ftol": self.params["lnEtol"], "maxiter": self.params["itmax"]},
+            )
+
+        # Run the GD algorithm (standard gradient descent) and obtain result
+        if self.optimiser == "GD":
+
+            # Initialise the results object, set the relevant hyperparameters and 
+            # then run the standard gradient descent algorithm
+            res = results_obj(init_params, func_to_opt)
+            lastf = res.fun
+            lr = self.params["learn_rate"]
+            ftol = self.params["lnEtol"]
+            absdiff = ftol + 1.0
+            while ((ftol < absdiff) & (res.nit < self.params["itmax"])) == True:
+
+                # Iterate the loop, parameter and function values
+                res.x -= lr * Dfunc_to_opt(res.x) / float(self.Ns)
+                res.fun = func_to_opt(res.x)
+                res.nit += 1
+
+                # Compute difference in function values for tolerance
+                absdiff = abs((res.fun-lastf) / lastf)
+                lastf = res.fun
+
+            # If specified tolerance was reached then trigger boolean
+            if ftol > absdiff:
+                res.success = True
+
+        # Output results of optimisation to bants.params dictionary
+        self.params["u"] = res.x[: self.Nd]
+        self.params["U_flat"] = res.x[self.Nd:self.Nd + (self.Nc * self.Nd)]
+        self.params["Psi_tril"] = res.x[self.Nd + (self.Nc * self.Nd):]
+
+        # Output fitting information to bants.info dictionary
+        self.info["converged"] = res.success
+        self.info["n_evaluations"] = res.nit
+        self.info["lnE_val"] = -res.fun
+
     # Standardisation procedure of the training data
     def standardise(self):
 
@@ -616,23 +799,59 @@ class bants:
         if standard == True and self.standardised == False:
             self.standardise()
 
-        # Find dimensions and number of samples in dataset
-        self.Nd = len(train_df.columns)
+        # Find number of samples in dataset
         self.Ns = len(train_df.index)
-
-        # If number of columns is more than 1 then check to see if kernel types have been specified. If not then
-        # simply set each column to the 'SquareExp' default option.
-        if (self.Nd > 1) and (len(self.column_kernel_types) == 1):
-            self.column_kernel_types = self.column_kernel_types * self.Nd
-
-        # If number of columns is more than 1 then check to see if signal periods have been specified. If not then
-        # simply set each column to the default option of 1.0.
-        if (self.Nd > 1) and (len(self.signal_periods) == 1):
-            self.signal_periods = self.signal_periods * self.Nd
 
         # If 'AR-GP' network then run appropriate optimisation subroutine
         if self.net_type == "AR-GP":
+            # Find dimensions in dataset
+            self.Nd = len(train_df.columns)
+
+            # If number of columns is more than 1 then check to see if kernel types have been specified. If not then
+            # simply set each column to the 'SquareExp' default option.
+            if (self.Nd > 1) and (len(self.column_kernel_types) == 1):
+                self.column_kernel_types = self.column_kernel_types * self.Nd
+
+            # If number of columns is more than 1 then check to see if signal periods have been specified. If not then
+            # simply set each column to the default option of 1.0.
+            if (self.Nd > 1) and (len(self.signal_periods) == 1):
+                self.signal_periods = self.signal_periods * self.Nd
+
             self.optimise_ARGP_hyperp(self.train_df)
+
+        # If 'KM-GP' network then run appropriate optimisation subroutines
+        if self.net_type == "KM-GP":
+            # Set the number of clustering and dataset dimensions
+            self.Nc = self.params["kmeans_nclus"]
+            self.Nd = len(train_df.columns)
+
+            if self.tsk is None:
+                self.tsk = self.TimeSeriesKMeans(
+                    n_clusters=self.params["kmeans_nclus"],
+                    max_iter=self.params["kmeans_max_iter"],
+                    metric='dtw',
+                    random_state=self.params["kmeans_random_state"],
+                )
+            if self.results["kmeans_clust_cent"] is None:
+                self.tsk.fit(
+                    self.train_df.values.reshape((self.Ns, self.Nd, 1)).swapaxes(0,1)
+                )
+                self.results["kmeans_clust_cent"] = self.tsk.cluster_centers_.swapaxes(0,1)[:, :, 0]
+                self.results["kmeans_clust_means"] = np.mean(self.results["kmeans_clust_cent"], axis=0)
+                self.results["kmeans_clust_stds"] = np.std(self.results["kmeans_clust_cent"], axis=0)
+                self.results["standardised_kmeans_clust_cent"] = (
+                    self.results["kmeans_clust_cent"] 
+                    - np.tensordot(
+                        np.ones(self.Ns),
+                        self.results["kmeans_clust_means"],
+                        axes=0,
+                    )
+                ) / np.tensordot(
+                    np.ones(self.Ns),
+                    self.results["kmeans_clust_stds"],
+                    axes=0,
+                )
+            self.optimise_KMGP_hyperp(self.train_df)
 
     # Method of 'predict' is analogous to the scikit-learn pattern
     def predict(self, ftime):
