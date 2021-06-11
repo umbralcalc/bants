@@ -32,10 +32,10 @@ class bants:
         # Set network type
         self.net_type = net_type
 
-        # Initialise empty dictionaries of network parameters to learn (and default hyperparameters of maximum number 
-        # of iterations, log-evidence tolerance and learning rate in the case of gradient descent), the fitting information 
+        # Initialise empty dictionaries of network parameters to learn (and default hyperparameters of maximum number
+        # of iterations, log-evidence tolerance and learning rate in the case of gradient descent), the fitting information
         # and prediction results
-        self.params = {"itmax" : 1000, "lnEtol" : 0.0001, "learn_rate" : 0.01}
+        self.params = {"itmax": 1000, "lnEtol": 0.0001, "learn_rate": 0.01}
         self.info = {}
         self.results = {}
 
@@ -63,6 +63,9 @@ class bants:
             self.hsq_guess = None
             self.Psi_tril_guess = None
 
+            # Set the appropriate prediction sampler
+            self.results["sampler"] = self.pred_ARGP_sampler
+
         # If network type if 'KM-GP' then import k-means clustering from tslearn and setup
         if self.net_type == "KM-GP":
             from tslearn.clustering import TimeSeriesKMeans
@@ -80,6 +83,9 @@ class bants:
             self.u_guess = None
             self.U_flat_guess = None
             self.Psi_tril_guess = None
+
+            # Set the appropriate prediction sampler
+            self.results["sampler"] = self.pred_KMGP_sampler
 
     # Function to output multivariate t-distribution (see here: https://en.wikipedia.org/wiki/Multivariate_t-distribution)
     # log-Probability Density Function from input dataframe points. No scipy implementation so wrote this one.
@@ -333,29 +339,32 @@ class bants:
         return conv_d, Dconv_d
 
     # Function to output random prediction samples corresponding to the the 'AR-GP' network
-    def pred_ARGP_sampler(self, nsamples, compute_map=True):
+    def pred_ARGP_sampler(self, ftime, nsamples, compute_map=True):
         """
         Function which generates (posterior or MAP - MAP is default) predictive samples for the N-dimensional 
         time series using the 'AR-GP' network, where its hyperparameters have been optimised by applying 
         bants.fit to a dataframe. 
 
         Args:
+        ftime
+            This is the timepoint (in units of the index of the train_df) for the forecast 
+            to generate predictive distributions up to from the training data endpoint.
         nsamples
             This is the number of random predictive samples to request for at each timestep.
+
+        Keywords:
+        compute_map
+            If True (which is the default) then compute the predictions with the MAP of the network.
         
         Returns: 
         pred_samps
             This is an output array of dimensions (nfut,dim,nsamples), where dim is the number
             of dimensions in the vector time series.
         
-        Keywords:
-        compute_map
-            If True (which is the default) then compute the predictions with the MAP of the network.
-        
         """
-        # Compute the number of timesteps to predict over from bants.ftime
+        # Compute the number of timesteps to predict over using ftime
         delta_t = self.train_df.index[1] - self.train_df.index[0]
-        nfut = int(np.ceil((self.ftime - self.train_df.index[-1]) / delta_t))
+        nfut = int(np.ceil((ftime - self.train_df.index[-1]) / delta_t))
 
         # Extract optimised hyperparameters
         hsq_opt = self.params["hsq"]
@@ -370,7 +379,7 @@ class bants:
             [(float(nf) * delta_t) + self.train_df.index[-1] for nf in range(0, nfut)]
         )
         pred_samps = np.empty((nfut, self.Nd, 0))
-        
+
         # Loop over samples (very slow at the moment) (this is a slow method with numpy/scipy and hence
         # will need to be customised in future to get more speed)
         for ns in range(0, nsamples):
@@ -388,11 +397,13 @@ class bants:
                     self.kconv(self.train_df, hsq_opt)[-1], Sigt
                 )
             ]
-            for nf in range(1, nfut):
+            for nf in range(0, nfut):
 
                 # Generate updated dataframe using past predicted samples
                 d_update = self.train_df.append(
-                    pd.DataFrame(data=np.asarray(out)[:nf], index=indices[:nf])
+                    pd.DataFrame(
+                        data=np.asarray(out)[: nf + 1], index=indices[: nf + 1]
+                    )
                 )
 
                 # Draw the corresponding normal variate
@@ -543,7 +554,10 @@ class bants:
                 func_to_opt,
                 init_params,
                 method="Nelder-Mead",
-                options={"ftol": self.params["lnEtol"], "maxiter": self.params["itmax"]},
+                options={
+                    "ftol": self.params["lnEtol"],
+                    "maxiter": self.params["itmax"],
+                },
             )
 
         # Run BFGS algorithm and obtain result with scipy optimiser
@@ -553,13 +567,16 @@ class bants:
                 init_params,
                 method="L-BFGS-B",
                 jac=Dfunc_to_opt,
-                options={"ftol": self.params["lnEtol"], "maxiter": self.params["itmax"]},
+                options={
+                    "ftol": self.params["lnEtol"],
+                    "maxiter": self.params["itmax"],
+                },
             )
 
         # Run the GD algorithm (standard gradient descent) and obtain result
         if self.optimiser == "GD":
 
-            # Initialise the results object, set the relevant hyperparameters and 
+            # Initialise the results object, set the relevant hyperparameters and
             # then run the standard gradient descent algorithm
             res = results_obj(init_params, func_to_opt)
             lastf = res.fun
@@ -574,7 +591,7 @@ class bants:
                 res.nit += 1
 
                 # Compute difference in function values for tolerance
-                absdiff = abs((res.fun-lastf) / lastf)
+                absdiff = abs((res.fun - lastf) / lastf)
                 lastf = res.fun
 
             # If specified tolerance was reached then trigger boolean
@@ -589,6 +606,128 @@ class bants:
         self.info["converged"] = res.success
         self.info["n_evaluations"] = res.nit
         self.info["lnE_val"] = -res.fun
+
+    # Function to output random prediction samples corresponding to the the 'KM-GP' network
+    def pred_KMGP_sampler(self, ftime, nsamples, compute_map=True, kmeans_window=50):
+        """
+        Function which generates (posterior or MAP - MAP is default) predictive samples for the N-dimensional 
+        time series using the 'KM-GP' network, where its hyperparameters have been optimised by applying 
+        bants.fit to a dataframe. 
+
+        Args:
+        ftime
+            This is the timepoint (in units of the index of the train_df) for the forecast 
+            to generate predictive distributions up to from the training data endpoint.
+        nsamples
+            This is the number of random predictive samples to request for at each timestep.
+
+        Keywords:
+        compute_map
+            If True (which is the default) then compute the predictions with the MAP of the network.
+        kmeans_window
+            Choose the window length of data used for refitting the k-means clustering for each
+            predictive timestep.
+        
+        Returns: 
+        pred_samps
+            This is an output array of dimensions (nfut,dim,nsamples), where dim is the number
+            of dimensions in the vector time series.
+        
+        """
+        # Compute the number of timesteps to predict over using ftime
+        delta_t = self.train_df.index[1] - self.train_df.index[0]
+        nfut = int(np.ceil((ftime - self.train_df.index[-1]) / delta_t))
+
+        # Extract optimised hyperparameters
+        u_opt = self.params["u"]
+        U_opt = self.params["U_flat"].reshape((self.Nc, self.Nd))
+        Psi_opt = np.zeros((self.Nd, self.Nd))
+        Psi_opt[np.tril_indices(self.Nd)] = self.params["Psi_tril"]
+
+        # Psi is symmetric
+        Psi_opt = Psi_opt + Psi_opt.T - np.diag(Psi_opt.diagonal())
+
+        # Create storage for predictions
+        pred_samps = []
+
+        # Get the mode of the inverse-Wishart distribution if computing the MAP prediction
+        if compute_map:
+            Sigt = [
+                Psi_opt / (self.nu + self.Nd + 1.0)
+                for ns in range(0, nsamples)
+            ]
+        else:
+            # Generate random covariance matrix from inverse-Wishart with optimal hyperparameters
+            Sigt = [
+                spst.invwishart.rvs(df=self.nu, scale=Psi_opt)
+                for ns in range(0, nsamples)
+            ]
+
+        # Setup the samples to fit the k-means clustering to each new timestep
+        datsamps = np.tensordot(
+            self.train_df.values.swapaxes(0, 1), np.ones(nsamples), axes=0
+        )[:,-kmeans_window:]
+
+        # Loop over future timepoints (this is an unavoidably slow method if one wants to
+        # use k-means clustering to compress the data at each timestep for consistency)
+        for nf in range(0, nfut):
+
+            # Fit the k-means clustering and compute the standardised centroids
+            self.tsk.fit(datsamps)
+            standardised_kmeans_clust_cent = (
+                self.tsk.cluster_centers_.swapaxes(0, 1)
+                - np.tensordot(
+                    np.ones((kmeans_window, nsamples)),
+                    self.results["kmeans_clust_means"],
+                    axes=0,
+                ).swapaxes(1, 2)
+            ) / np.tensordot(
+                np.ones((kmeans_window, nsamples)),
+                self.results["kmeans_clust_stds"],
+                axes=0,
+            ).swapaxes(
+                1, 2
+            )
+
+            # Use the optimal network hyperparameters to compute the new means for prediction
+            mt = standardised_kmeans_clust_cent
+            Mt = np.tensordot(mt, U_opt, axes=([1], [0])) + np.tensordot(
+                np.ones((kmeans_window, nsamples)), u_opt, axes=0
+            )
+
+            # Generate predictive samples using a multivariate normal
+            samps = np.asarray(
+                [
+                    np.random.multivariate_normal(Mt[-1, ns], Sigt[ns])
+                    for ns in range(0, nsamples)
+                ]
+            )
+
+            # Add new set of predicted future timepoints to output
+            pred_samps.append(samps)
+
+            # Add to the ensemble of data samples used for k-means clustering fit and 
+            # iterate the window forward in time
+            datsamps = np.append(datsamps, samps[:, np.newaxis].swapaxes(0, 2), axis=1)[:, 1:]
+
+        # Reshape to match output
+        pred_samps = np.asarray(pred_samps).swapaxes(1, 2)
+
+        # Output predictive samples with or without standardisation
+        if self.standardised == True:
+            mfact = np.tensordot(
+                np.tensordot(np.ones(nfut), self.mean_train_df, axes=0),
+                np.ones(nsamples),
+                axes=0,
+            )
+            sfact = np.tensordot(
+                np.tensordot(np.ones(nfut), self.std_train_df, axes=0),
+                np.ones(nsamples),
+                axes=0,
+            )
+            return mfact + (sfact * pred_samps)
+        if self.standardised == False:
+            return pred_samps
 
     # Subroutine for the 'KM-GP' network
     def optimise_KMGP_hyperp(self, df):
@@ -621,16 +760,18 @@ class bants:
 
             # Extract hyperparameters
             u = params[:N]
-            U = params[N:N + (Nc * N)].reshape((Nc, N))
+            U = params[N : N + (Nc * N)].reshape((Nc, N))
             Psi = np.zeros((N, N))
-            Psi[np.tril_indices(N)] = params[N + (Nc * N):]
+            Psi[np.tril_indices(N)] = params[N + (Nc * N) :]
 
             # Psi is symmetric
             Psi = Psi + Psi.T - np.diag(Psi.diagonal())
 
             # Calculate the mean for each data point using k-means and the network parameters
             mt = self.results["standardised_kmeans_clust_cent"]
-            Mt = np.tensordot(mt, U, axes=([1], [0])) + np.tensordot(np.ones(self.Ns), u, axes=0)
+            Mt = np.tensordot(mt, U, axes=([1], [0])) + np.tensordot(
+                np.ones(self.Ns), u, axes=0
+            )
 
             # Compute the scale matrix
             Sm = Psi / (self.nu - N + 1.0)
@@ -641,26 +782,38 @@ class bants:
             # Output corresponding value to minimise
             return -lnE
 
-        # Get the flattened U indices for convenient indexing in the first derivatives 
-        iflat = np.tensordot(np.arange(0, self.Nc, 1), np.ones(self.Nd), axes=0).astype(int).flatten()
-        jflat = np.tensordot(np.ones(self.Nc), np.arange(0, self.Nd, 1), axes=0).astype(int).flatten()
+        # Get the flattened U indices for convenient indexing in the first derivatives
+        iflat = (
+            np.tensordot(np.arange(0, self.Nc, 1), np.ones(self.Nd), axes=0)
+            .astype(int)
+            .flatten()
+        )
+        jflat = (
+            np.tensordot(np.ones(self.Nc), np.arange(0, self.Nd, 1), axes=0)
+            .astype(int)
+            .flatten()
+        )
 
         # Define the gradient of the function to optimise over to obtain optimal network hyperparameters
         # if the chosen optimiser is gradient-based
-        def Dfunc_to_opt(params, df=df, N=self.Nd, Nc=self.Nc, iflat=iflat, jflat=jflat):
+        def Dfunc_to_opt(
+            params, df=df, N=self.Nd, Nc=self.Nc, iflat=iflat, jflat=jflat
+        ):
 
             # Extract hyperparameters
             u = params[:N]
-            U = params[N:N + (Nc * N)].reshape((Nc, N))
+            U = params[N : N + (Nc * N)].reshape((Nc, N))
             Psi = np.zeros((N, N))
-            Psi[np.tril_indices(N)] = params[N + (Nc * N):]
+            Psi[np.tril_indices(N)] = params[N + (Nc * N) :]
 
             # Psi is symmetric
             Psi = Psi + Psi.T - np.diag(Psi.diagonal())
 
             # Calculate the mean for each data point using k-means and the network parameters
             mt = self.results["standardised_kmeans_clust_cent"]
-            Mt = np.tensordot(mt, U, axes=([1], [0])) + np.tensordot(np.ones(self.Ns), u, axes=0)
+            Mt = np.tensordot(mt, U, axes=([1], [0])) + np.tensordot(
+                np.ones(self.Ns), u, axes=0
+            )
 
             # Compute the gradient values
             x_minus_mu = df.values - Mt
@@ -669,20 +822,20 @@ class bants:
             vect = np.tensordot(inversePsi, x_minus_mu, axes=([0], [1]))
             contraction = np.sum(x_minus_mu.T * vect, axis=0)
             DlnE = np.zeros_like(params)
-            DlnE[:N] = - np.sum(
+            DlnE[:N] = np.sum(
                 (self.nu + 1.0)
                 * vect
                 / np.tensordot(np.ones(N), 1.0 + contraction, axes=0),
                 axis=1,
             )
-            DlnE[N:N + (Nc * N)] = - np.sum(
+            DlnE[N : N + (Nc * N)] = np.sum(
                 (self.nu + 1.0)
                 * mt.T[iflat]
-                * vect[jflat] 
+                * vect[jflat]
                 / np.tensordot(np.ones(Nc * N), 1.0 + contraction, axes=0),
                 axis=1,
             )
-            DlnE[N + (Nc * N):] = -0.5 * np.identity(N)[np.tril_indices(N)] + (
+            DlnE[N + (Nc * N) :] = -0.5 * np.identity(N)[np.tril_indices(N)] + (
                 ((self.nu + 1.0) / 2.0)
                 * np.sum(
                     x_minus_mu[:, np.tril_indices(N)[0]].T
@@ -691,7 +844,7 @@ class bants:
                     )
                     * x_minus_mu[:, np.tril_indices(N)[1]].T
                     / np.tensordot(
-                        np.ones_like(params[N + (Nc * N):]), 1.0 + contraction, axes=0
+                        np.ones_like(params[N + (Nc * N) :]), 1.0 + contraction, axes=0
                     ),
                     axis=1,
                 )
@@ -702,7 +855,9 @@ class bants:
 
         # With initial guesses for the parameters implement optimisation with bants.params["itmax"] as the maximum
         # number of iterations permitted for the algorithm and bants.params["lnEtol"] as the log-evidence tolerance
-        init_params = np.append(np.append(self.u_guess, self.U_flat_guess), self.Psi_tril_guess)
+        init_params = np.append(
+            np.append(self.u_guess, self.U_flat_guess), self.Psi_tril_guess
+        )
 
         # Run Nelder-Mead algorithm and obtain result with scipy optimiser
         if self.optimiser == "Nelder-Mead":
@@ -710,7 +865,10 @@ class bants:
                 func_to_opt,
                 init_params,
                 method="Nelder-Mead",
-                options={"ftol": self.params["lnEtol"], "maxiter": self.params["itmax"]},
+                options={
+                    "ftol": self.params["lnEtol"],
+                    "maxiter": self.params["itmax"],
+                },
             )
 
         # Run BFGS algorithm and obtain result with scipy optimiser
@@ -720,13 +878,16 @@ class bants:
                 init_params,
                 method="L-BFGS-B",
                 jac=Dfunc_to_opt,
-                options={"ftol": self.params["lnEtol"], "maxiter": self.params["itmax"]},
+                options={
+                    "ftol": self.params["lnEtol"],
+                    "maxiter": self.params["itmax"],
+                },
             )
 
         # Run the GD algorithm (standard gradient descent) and obtain result
         if self.optimiser == "GD":
 
-            # Initialise the results object, set the relevant hyperparameters and 
+            # Initialise the results object, set the relevant hyperparameters and
             # then run the standard gradient descent algorithm
             res = results_obj(init_params, func_to_opt)
             lastf = res.fun
@@ -741,7 +902,7 @@ class bants:
                 res.nit += 1
 
                 # Compute difference in function values for tolerance
-                absdiff = abs((res.fun-lastf) / lastf)
+                absdiff = abs((res.fun - lastf) / lastf)
                 lastf = res.fun
 
             # If specified tolerance was reached then trigger boolean
@@ -750,8 +911,8 @@ class bants:
 
         # Output results of optimisation to bants.params dictionary
         self.params["u"] = res.x[: self.Nd]
-        self.params["U_flat"] = res.x[self.Nd:self.Nd + (self.Nc * self.Nd)]
-        self.params["Psi_tril"] = res.x[self.Nd + (self.Nc * self.Nd):]
+        self.params["U_flat"] = res.x[self.Nd : self.Nd + (self.Nc * self.Nd)]
+        self.params["Psi_tril"] = res.x[self.Nd + (self.Nc * self.Nd) :]
 
         # Output fitting information to bants.info dictionary
         self.info["converged"] = res.success
@@ -829,49 +990,63 @@ class bants:
                 self.tsk = self.TimeSeriesKMeans(
                     n_clusters=self.params["kmeans_nclus"],
                     max_iter=self.params["kmeans_max_iter"],
-                    metric='dtw',
+                    metric="dtw",
                     random_state=self.params["kmeans_random_state"],
                 )
             if self.results["kmeans_clust_cent"] is None:
                 self.tsk.fit(
-                    self.train_df.values.reshape((self.Ns, self.Nd, 1)).swapaxes(0,1)
+                    self.train_df.values.reshape((self.Ns, self.Nd, 1)).swapaxes(0, 1)
                 )
-                self.results["kmeans_clust_cent"] = self.tsk.cluster_centers_.swapaxes(0,1)[:, :, 0]
-                self.results["kmeans_clust_means"] = np.mean(self.results["kmeans_clust_cent"], axis=0)
-                self.results["kmeans_clust_stds"] = np.std(self.results["kmeans_clust_cent"], axis=0)
+                self.results["kmeans_clust_cent"] = self.tsk.cluster_centers_.swapaxes(
+                    0, 1
+                )[:, :, 0]
+                self.results["kmeans_clust_means"] = np.mean(
+                    self.results["kmeans_clust_cent"], axis=0
+                )
+                self.results["kmeans_clust_stds"] = np.std(
+                    self.results["kmeans_clust_cent"], axis=0
+                )
                 self.results["standardised_kmeans_clust_cent"] = (
-                    self.results["kmeans_clust_cent"] 
+                    self.results["kmeans_clust_cent"]
                     - np.tensordot(
-                        np.ones(self.Ns),
-                        self.results["kmeans_clust_means"],
-                        axes=0,
+                        np.ones(self.Ns), self.results["kmeans_clust_means"], axes=0,
                     )
                 ) / np.tensordot(
-                    np.ones(self.Ns),
-                    self.results["kmeans_clust_stds"],
-                    axes=0,
+                    np.ones(self.Ns), self.results["kmeans_clust_stds"], axes=0,
                 )
             self.optimise_KMGP_hyperp(self.train_df)
 
     # Method of 'predict' is analogous to the scikit-learn pattern
-    def predict(self, ftime):
+    def predict(self, ftime, nsamples, compute_map=True, **kwargs):
         """
-        Method to make predictions for the N-dimensional time series using the fitted 'bants' network. The 
-        result from the prediction is a future point sampler which can be found in the bants.results dictionary.
+        Method to generate (posterior or MAP - MAP is default) predictive samples for the N-dimensional 
+        time series using any chosen network, where its hyperparameters must have already been optimised 
+        by applying bants.fit to a dataframe. The future point sampler which can also be found in the 
+        bants.results dictionary.
 
         Args:
         ftime
             This is the timepoint (in units of the index of the train_df) for the forecast 
             to generate predictive distributions up to from the training data endpoint. 
+        nsamples
+            This is the number of random predictive samples to request for at each timestep.
+
+        Keywords:
+        compute_map
+            If True (which is the default) then compute the predictions with the MAP of the network.
+        kmeans_window
+            This is used only with the 'KM-GP' network. Choose the window length of data used for 
+            refitting the k-means clustering for each predictive timestep.
+        
+        Returns: 
+        pred_samps
+            This is an output array of dimensions (nfut,dim,nsamples), where dim is the number
+            of dimensions in the vector time series.
                        
         """
-        # Set future timepoint for prediction generally in class
-        self.ftime = ftime
+        # Generate and output the predictions
+        return self.results["sampler"](ftime, nsamples, compute_map=compute_map, **kwargs)
 
-        # If 'AR-GP' network then set the appropriate predictive sampler
-        if self.net_type == "AR-GP":
-            # Store the prediction sampler with optimised hyperparameters
-            self.results["sampler"] = self.pred_ARGP_sampler
 
 class results_obj:
     def __init__(self, x, f):
