@@ -1,5 +1,7 @@
 # BANTS
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.4955584.svg)](https://doi.org/10.5281/zenodo.4955584)
+
 ### BAyesian Networks for Time Series forecasting
 
 This is a python class for building Bayesian networks to forecast generic n-dimensional time series data. 
