@@ -397,12 +397,12 @@ class bants:
                     self.kconv(self.train_df, hsq_opt)[-1], Sigt
                 )
             ]
-            for nf in range(0, nfut):
+            for nf in range(1, nfut):
 
                 # Generate updated dataframe using past predicted samples
                 d_update = self.train_df.append(
                     pd.DataFrame(
-                        data=np.asarray(out)[: nf + 1], index=indices[: nf + 1]
+                        data=np.asarray(out)[:nf], index=indices[:nf]
                     )
                 )
 
