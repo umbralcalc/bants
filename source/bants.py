@@ -16,15 +16,15 @@ import scipy.stats as spst
 
 # Initialize the 'bants' method class
 class bants:
-
-    # Initialisation needs only the network type as input. Only type so far is 'AR-GP'.
+    # Initialisation needs only the network type as input.
     def __init__(self, net_type):
+        """Choose net_type from 'AR-G' or 'KM-G'"""
 
         # Methods and functions
         self.fit
         self.predict
-        self.optimise_ARGP_hyperp
-        self.pred_ARGP_sampler
+        self.optimise_ARG_hyperp
+        self.pred_ARG_sampler
         self.kconv
         self.tD_logpdf
         self.standardise
@@ -47,9 +47,8 @@ class bants:
         # Set the default optimisation algorithm
         self.optimiser = "GD"
 
-        # If network type is 'AR-GP' then set kernel types
-        if self.net_type == "AR-GP":
-
+        # If network type is 'AR-G' then set kernel types
+        if self.net_type == "AR-G":
             # Default type of convolution kernel for each column is always 'SquareExp'. The other option, for oscillatory
             # columns in the data over time, is 'Periodic'.
             self.column_kernel_types = ["SquareExp"]
@@ -64,10 +63,10 @@ class bants:
             self.Psi_tril_guess = None
 
             # Set the appropriate prediction sampler
-            self.results["sampler"] = self.pred_ARGP_sampler
+            self.results["sampler"] = self.pred_ARG_sampler
 
-        # If network type if 'KM-GP' then import k-means clustering from tslearn and setup
-        if self.net_type == "KM-GP":
+        # If network type if 'KM-G' then import k-means clustering from tslearn and setup
+        if self.net_type == "KM-G":
             from tslearn.clustering import TimeSeriesKMeans
 
             # Initialise the k-means clustering method and hyperparameters
@@ -85,12 +84,11 @@ class bants:
             self.Psi_tril_guess = None
 
             # Set the appropriate prediction sampler
-            self.results["sampler"] = self.pred_KMGP_sampler
+            self.results["sampler"] = self.pred_KMG_sampler
 
     # Function to output multivariate t-distribution (see here: https://en.wikipedia.org/wiki/Multivariate_t-distribution)
     # log-Probability Density Function from input dataframe points. No scipy implementation so wrote this one.
     def tD_logpdf(self, df, nu, mu, Sigma):
-
         # Compute the log normalisation of the distribution using scipy loggammas
         log_norm = (
             sps.loggamma((nu + self.Nd) / 2.0)
@@ -113,20 +111,20 @@ class bants:
         # Output result
         return log_norm + log_densfunc
 
-    # Kernel convolution for the 'AR-GP' network
+    # Kernel convolution for the 'AR-G' network
     def kconv(self, df, hsq):
         """
         Method of kernel convolution on input dataframe values according to whichever kernel types were specified
-        in the bants.column_kernel_types list. This is used mainly in bants.optimise_ARGP_hyperp but can be used
+        in the bants.column_kernel_types list. This is used mainly in bants.optimise_ARG_hyperp but can be used
         independently on different dataframes for experimentation.
-    
+
         Args:
         df
             This is the input dataframe of values to perform the convolution on.
         hsq
             This is an input 1-d array of the same length as the number of columns in the dataframe
             containing the square-amplitude of the kernel scales for each time series dimension.
-                       
+
         Returns:
         conv_d
             This is an output array of convolved data the same shape as the input dataframe.
@@ -145,10 +143,9 @@ class bants:
         # Create function which returns an array corresponding to the convolution window function for
         # the chosen input kernel type.
         def kern_array(kern_type, hsq, perd):
-
             # Output weights corresponding to the convolution kernels
             if kern_type == "SquareExp":
-                return np.exp(-(dtimes ** 2.0) / (2.0 * hsq))
+                return np.exp(-(dtimes**2.0) / (2.0 * hsq))
             if kern_type == "Periodic":
                 return np.exp(
                     -2.0 * ((np.sin(np.abs(np.pi * dtimes / perd))) ** 2.0) / hsq
@@ -185,25 +182,25 @@ class bants:
         # Return convolved signals
         return conv_d
 
-    # Kernel convolution and its first derivative for the 'AR-GP' network
+    # Kernel convolution and its first derivative for the 'AR-G' network
     def kconv_and_deriv(self, df, hsq):
         """
         Method of kernel convolution on input dataframe values according to whichever kernel types were specified
-        in the bants.column_kernel_types list. This method also computes the first derivatives of the convolved 
-        data. This is used mainly in bants.optimise_ARGP_hyperp with the gradient-based optimisers but can be used 
+        in the bants.column_kernel_types list. This method also computes the first derivatives of the convolved
+        data. This is used mainly in bants.optimise_ARG_hyperp with the gradient-based optimisers but can be used
         independently on different dataframes for experimentation.
-    
+
         Args:
         df
             This is the input dataframe of values to perform the convolution on.
         hsq
             This is an input 1-d array of the same length as the number of columns in the dataframe
             containing the square-amplitude of the kernel scales for each time series dimension.
-                       
+
         Returns:
         (conv_d, Dconv_d)
             conv_d
-                This is an output array of convolved data the same shape as the input dataframe. 
+                This is an output array of convolved data the same shape as the input dataframe.
             Dconv_d
                 This is an output corresponding to the first derivative of the convolved data. Since the
                 cross-derivatives of the corresponding Jacobian are zero, this is merely a 1-d array of the
@@ -223,10 +220,9 @@ class bants:
         # Create function which returns an array corresponding to the convolution window function for
         # the chosen input kernel type.
         def kern_array(kern_type, hsq, perd):
-
             # Output weights corresponding to the convolution kernels
             if kern_type == "SquareExp":
-                return np.exp(-(dtimes ** 2.0) / (2.0 * hsq))
+                return np.exp(-(dtimes**2.0) / (2.0 * hsq))
             if kern_type == "Periodic":
                 return np.exp(
                     -2.0 * ((np.sin(np.abs(np.pi * dtimes / perd))) ** 2.0) / hsq
@@ -235,10 +231,9 @@ class bants:
         # Create function which returns an array corresponding to the convolution window function for
         # the chosen input kernel type.
         def kern_array(kern_type, hsq, perd):
-
             # Output weights corresponding to the convolution kernels
             if kern_type == "SquareExp":
-                return np.exp(-(dtimes ** 2.0) / (2.0 * hsq))
+                return np.exp(-(dtimes**2.0) / (2.0 * hsq))
             if kern_type == "Periodic":
                 return np.exp(
                     -2.0 * ((np.sin(np.abs(np.pi * dtimes / perd))) ** 2.0) / hsq
@@ -247,11 +242,10 @@ class bants:
         # Create function which returns an array corresponding to the first derviative of the unnormalised
         # convolution window function for the chosen input kernel type.
         def Dkern_array_unnorm(kern_type, hsq, perd):
-
             # Output weights corresponding to the convolution kernels
             if kern_type == "SquareExp":
-                return (dtimes ** 2.0 / (2.0 * hsq * hsq)) * np.exp(
-                    -(dtimes ** 2.0) / (2.0 * hsq)
+                return (dtimes**2.0 / (2.0 * hsq * hsq)) * np.exp(
+                    -(dtimes**2.0) / (2.0 * hsq)
                 )
             if kern_type == "Periodic":
                 return (
@@ -338,16 +332,16 @@ class bants:
         # Return convolved signals in a tuple
         return conv_d, Dconv_d
 
-    # Function to output random prediction samples corresponding to the the 'AR-GP' network
-    def pred_ARGP_sampler(self, ftime, nsamples, compute_map=True):
+    # Function to output random prediction samples corresponding to the the 'AR-G' network
+    def pred_ARG_sampler(self, ftime, nsamples, compute_map=True):
         """
-        Function which generates (posterior or MAP - MAP is default) predictive samples for the N-dimensional 
-        time series using the 'AR-GP' network, where its hyperparameters have been optimised by applying 
-        bants.fit to a dataframe. 
+        Function which generates (posterior or MAP - MAP is default) predictive samples for the N-dimensional
+        time series using the 'AR-G' network, where its hyperparameters have been optimised by applying
+        bants.fit to a dataframe.
 
         Args:
         ftime
-            This is the timepoint (in units of the index of the train_df) for the forecast 
+            This is the timepoint (in units of the index of the train_df) for the forecast
             to generate predictive distributions up to from the training data endpoint.
         nsamples
             This is the number of random predictive samples to request for at each timestep.
@@ -355,12 +349,12 @@ class bants:
         Keywords:
         compute_map
             If True (which is the default) then compute the predictions with the MAP of the network.
-        
-        Returns: 
+
+        Returns:
         pred_samps
             This is an output array of dimensions (nfut,dim,nsamples), where dim is the number
             of dimensions in the vector time series.
-        
+
         """
         # Compute the number of timesteps to predict over using ftime
         delta_t = self.train_df.index[1] - self.train_df.index[0]
@@ -383,7 +377,6 @@ class bants:
         # Loop over samples (very slow at the moment) (this is a slow method with numpy/scipy and hence
         # will need to be customised in future to get more speed)
         for ns in range(0, nsamples):
-
             # Get the mode of the inverse-Wishart distribution if computing the MAP prediction
             if compute_map:
                 Sigt = Psi_opt / (self.nu + self.Nd + 1.0)
@@ -391,19 +384,16 @@ class bants:
                 # Generate random covariance matrix from inverse-Wishart with optimal hyperparameters
                 Sigt = spst.invwishart.rvs(df=self.nu, scale=Psi_opt)
 
-            # Loop over future timepoints and generate samples from the 'AR-GP' network iteratively
+            # Loop over future timepoints and generate samples from the 'AR-G' network iteratively
             out = [
                 np.random.multivariate_normal(
                     self.kconv(self.train_df, hsq_opt)[-1], Sigt
                 )
             ]
             for nf in range(1, nfut):
-
                 # Generate updated dataframe using past predicted samples
                 d_update = self.train_df.append(
-                    pd.DataFrame(
-                        data=np.asarray(out)[:nf], index=indices[:nf]
-                    )
+                    pd.DataFrame(data=np.asarray(out)[:nf], index=indices[:nf])
                 )
 
                 # Draw the corresponding normal variate
@@ -433,16 +423,16 @@ class bants:
         if self.standardised == False:
             return pred_samps
 
-    # Subroutine for the 'AR-GP' network
-    def optimise_ARGP_hyperp(self, df):
+    # Subroutine for the 'AR-G' network
+    def optimise_ARG_hyperp(self, df):
         """
-        Method to optimise the 'AR-GP' network hyperparameters as defined in notes/theory-notes.ipynb.
+        Method to optimise the 'AR-G' network hyperparameters as defined in notes/theory-notes.ipynb.
         Optimisation outputs are written to bants.params and bants.info accordingly.
-    
+
         Args:
         df
             This is the input dataframe of values to optimise the hyperparameters with respect to.
-                       
+
         """
         # If not already set, then fix the number of degrees of freedom to correspond to the non-informative prior
         if self.nu is None:
@@ -473,7 +463,6 @@ class bants:
 
         # Define the function to optimise over to obtain optimal network hyperparameters
         def func_to_opt(params, df=df, N=self.Nd):
-
             # Extract hyperparameters
             hsq = np.exp(
                 params[:N]
@@ -499,7 +488,6 @@ class bants:
         # Define the gradient of the function to optimise over to obtain optimal network hyperparameters
         # if the chosen optimiser is gradient-based
         def Dfunc_to_opt(params, df=df, N=self.Nd):
-
             # Extract hyperparameters
             hsq = np.exp(
                 params[:N]
@@ -575,7 +563,6 @@ class bants:
 
         # Run the GD algorithm (standard gradient descent) and obtain result
         if self.optimiser == "GD":
-
             # Initialise the results object, set the relevant hyperparameters and
             # then run the standard gradient descent algorithm
             res = results_obj(init_params, func_to_opt)
@@ -584,7 +571,6 @@ class bants:
             ftol = self.params["lnEtol"]
             absdiff = ftol + 1.0
             while ((ftol < absdiff) & (res.nit < self.params["itmax"])) == True:
-
                 # Iterate the loop, parameter and function values
                 res.x -= lr * Dfunc_to_opt(res.x) / float(self.Ns)
                 res.fun = func_to_opt(res.x)
@@ -607,16 +593,16 @@ class bants:
         self.info["n_evaluations"] = res.nit
         self.info["lnE_val"] = -res.fun
 
-    # Function to output random prediction samples corresponding to the the 'KM-GP' network
-    def pred_KMGP_sampler(self, ftime, nsamples, compute_map=True, kmeans_window=50):
+    # Function to output random prediction samples corresponding to the the 'KM-G' network
+    def pred_KMG_sampler(self, ftime, nsamples, compute_map=True, kmeans_window=50):
         """
-        Function which generates (posterior or MAP - MAP is default) predictive samples for the N-dimensional 
-        time series using the 'KM-GP' network, where its hyperparameters have been optimised by applying 
-        bants.fit to a dataframe. 
+        Function which generates (posterior or MAP - MAP is default) predictive samples for the N-dimensional
+        time series using the 'KM-G' network, where its hyperparameters have been optimised by applying
+        bants.fit to a dataframe.
 
         Args:
         ftime
-            This is the timepoint (in units of the index of the train_df) for the forecast 
+            This is the timepoint (in units of the index of the train_df) for the forecast
             to generate predictive distributions up to from the training data endpoint.
         nsamples
             This is the number of random predictive samples to request for at each timestep.
@@ -627,12 +613,12 @@ class bants:
         kmeans_window
             Choose the window length of data used for refitting the k-means clustering for each
             predictive timestep.
-        
-        Returns: 
+
+        Returns:
         pred_samps
             This is an output array of dimensions (nfut,dim,nsamples), where dim is the number
             of dimensions in the vector time series.
-        
+
         """
         # Compute the number of timesteps to predict over using ftime
         delta_t = self.train_df.index[1] - self.train_df.index[0]
@@ -652,10 +638,7 @@ class bants:
 
         # Get the mode of the inverse-Wishart distribution if computing the MAP prediction
         if compute_map:
-            Sigt = [
-                Psi_opt / (self.nu + self.Nd + 1.0)
-                for ns in range(0, nsamples)
-            ]
+            Sigt = [Psi_opt / (self.nu + self.Nd + 1.0) for ns in range(0, nsamples)]
         else:
             # Generate random covariance matrix from inverse-Wishart with optimal hyperparameters
             Sigt = [
@@ -666,12 +649,11 @@ class bants:
         # Setup the samples to fit the k-means clustering to each new timestep
         datsamps = np.tensordot(
             self.train_df.values.swapaxes(0, 1), np.ones(nsamples), axes=0
-        )[:,-kmeans_window:]
+        )[:, -kmeans_window:]
 
         # Loop over future timepoints (this is an unavoidably slow method if one wants to
         # use k-means clustering to compress the data at each timestep for consistency)
         for nf in range(0, nfut):
-
             # Fit the k-means clustering and compute the standardised centroids
             self.tsk.fit(datsamps)
             standardised_kmeans_clust_cent = (
@@ -706,9 +688,11 @@ class bants:
             # Add new set of predicted future timepoints to output
             pred_samps.append(samps)
 
-            # Add to the ensemble of data samples used for k-means clustering fit and 
+            # Add to the ensemble of data samples used for k-means clustering fit and
             # iterate the window forward in time
-            datsamps = np.append(datsamps, samps[:, np.newaxis].swapaxes(0, 2), axis=1)[:, 1:]
+            datsamps = np.append(datsamps, samps[:, np.newaxis].swapaxes(0, 2), axis=1)[
+                :, 1:
+            ]
 
         # Reshape to match output
         pred_samps = np.asarray(pred_samps).swapaxes(1, 2)
@@ -729,16 +713,16 @@ class bants:
         if self.standardised == False:
             return pred_samps
 
-    # Subroutine for the 'KM-GP' network
-    def optimise_KMGP_hyperp(self, df):
+    # Subroutine for the 'KM-G' network
+    def optimise_KMG_hyperp(self, df):
         """
-        Method to optimise the 'KM-GP' network hyperparameters as defined in notes/theory-notes.ipynb.
+        Method to optimise the 'KM-G' network hyperparameters as defined in notes/theory-notes.ipynb.
         Optimisation outputs are written to bants.params and bants.info accordingly.
-    
+
         Args:
         df
             This is the input dataframe of values to optimise the hyperparameters with respect to.
-                       
+
         """
         # If not already set, then fix the number of degrees of freedom to correspond to the non-informative prior
         if self.nu is None:
@@ -757,7 +741,6 @@ class bants:
 
         # Define the function to optimise over to obtain optimal network hyperparameters
         def func_to_opt(params, df=df, N=self.Nd, Nc=self.Nc):
-
             # Extract hyperparameters
             u = params[:N]
             U = params[N : N + (Nc * N)].reshape((Nc, N))
@@ -799,7 +782,6 @@ class bants:
         def Dfunc_to_opt(
             params, df=df, N=self.Nd, Nc=self.Nc, iflat=iflat, jflat=jflat
         ):
-
             # Extract hyperparameters
             u = params[:N]
             U = params[N : N + (Nc * N)].reshape((Nc, N))
@@ -886,7 +868,6 @@ class bants:
 
         # Run the GD algorithm (standard gradient descent) and obtain result
         if self.optimiser == "GD":
-
             # Initialise the results object, set the relevant hyperparameters and
             # then run the standard gradient descent algorithm
             res = results_obj(init_params, func_to_opt)
@@ -895,7 +876,6 @@ class bants:
             ftol = self.params["lnEtol"]
             absdiff = ftol + 1.0
             while ((ftol < absdiff) & (res.nit < self.params["itmax"])) == True:
-
                 # Iterate the loop, parameter and function values
                 res.x -= lr * Dfunc_to_opt(res.x) / float(self.Ns)
                 res.fun = func_to_opt(res.x)
@@ -921,7 +901,6 @@ class bants:
 
     # Standardisation procedure of the training data
     def standardise(self):
-
         # Compute mean and standard deviation of the training dataframe
         mean_df = self.train_df.mean()
         std_df = self.train_df.std()
@@ -940,18 +919,18 @@ class bants:
     def fit(self, train_df, standard=True):
         """
         Method to infer the network structure by computing the log Bayesian evidence through optimisation of the prior
-        hyperparameters of the network. Learned network parameters can be found in the bants.params dictionary. Fitting 
+        hyperparameters of the network. Learned network parameters can be found in the bants.params dictionary. Fitting
         information can be found in the bants.info dictionary.
 
         Args:
         train_df
-            This is an input dataframe representing the training data of the vector time series process 
+            This is an input dataframe representing the training data of the vector time series process
             that one wishes to model. Simply set this to be a pandas dataframe with time as the index.
 
-        Keywords:            
+        Keywords:
         standard
             Boolean to specify if the input data is standardised prior to fitting or not. The default is 'True'.
-                       
+
         """
         # Make training data available to class object
         self.train_df = train_df
@@ -963,8 +942,8 @@ class bants:
         # Find number of samples in dataset
         self.Ns = len(train_df.index)
 
-        # If 'AR-GP' network then run appropriate optimisation subroutine
-        if self.net_type == "AR-GP":
+        # If 'AR-G' network then run appropriate optimisation subroutine
+        if self.net_type == "AR-G":
             # Find dimensions in dataset
             self.Nd = len(train_df.columns)
 
@@ -978,10 +957,10 @@ class bants:
             if (self.Nd > 1) and (len(self.signal_periods) == 1):
                 self.signal_periods = self.signal_periods * self.Nd
 
-            self.optimise_ARGP_hyperp(self.train_df)
+            self.optimise_ARG_hyperp(self.train_df)
 
-        # If 'KM-GP' network then run appropriate optimisation subroutines
-        if self.net_type == "KM-GP":
+        # If 'KM-G' network then run appropriate optimisation subroutines
+        if self.net_type == "KM-G":
             # Set the number of clustering and dataset dimensions
             self.Nc = self.params["kmeans_nclus"]
             self.Nd = len(train_df.columns)
@@ -1009,25 +988,29 @@ class bants:
                 self.results["standardised_kmeans_clust_cent"] = (
                     self.results["kmeans_clust_cent"]
                     - np.tensordot(
-                        np.ones(self.Ns), self.results["kmeans_clust_means"], axes=0,
+                        np.ones(self.Ns),
+                        self.results["kmeans_clust_means"],
+                        axes=0,
                     )
                 ) / np.tensordot(
-                    np.ones(self.Ns), self.results["kmeans_clust_stds"], axes=0,
+                    np.ones(self.Ns),
+                    self.results["kmeans_clust_stds"],
+                    axes=0,
                 )
-            self.optimise_KMGP_hyperp(self.train_df)
+            self.optimise_KMG_hyperp(self.train_df)
 
     # Method of 'predict' is analogous to the scikit-learn pattern
     def predict(self, ftime, nsamples, compute_map=True, **kwargs):
         """
-        Method to generate (posterior or MAP - MAP is default) predictive samples for the N-dimensional 
-        time series using any chosen network, where its hyperparameters must have already been optimised 
-        by applying bants.fit to a dataframe. The future point sampler which can also be found in the 
+        Method to generate (posterior or MAP - MAP is default) predictive samples for the N-dimensional
+        time series using any chosen network, where its hyperparameters must have already been optimised
+        by applying bants.fit to a dataframe. The future point sampler which can also be found in the
         bants.results dictionary.
 
         Args:
         ftime
-            This is the timepoint (in units of the index of the train_df) for the forecast 
-            to generate predictive distributions up to from the training data endpoint. 
+            This is the timepoint (in units of the index of the train_df) for the forecast
+            to generate predictive distributions up to from the training data endpoint.
         nsamples
             This is the number of random predictive samples to request for at each timestep.
 
@@ -1035,17 +1018,19 @@ class bants:
         compute_map
             If True (which is the default) then compute the predictions with the MAP of the network.
         kmeans_window
-            This is used only with the 'KM-GP' network. Choose the window length of data used for 
+            This is used only with the 'KM-G' network. Choose the window length of data used for
             refitting the k-means clustering for each predictive timestep.
-        
-        Returns: 
+
+        Returns:
         pred_samps
             This is an output array of dimensions (nfut,dim,nsamples), where dim is the number
             of dimensions in the vector time series.
-                       
+
         """
         # Generate and output the predictions
-        return self.results["sampler"](ftime, nsamples, compute_map=compute_map, **kwargs)
+        return self.results["sampler"](
+            ftime, nsamples, compute_map=compute_map, **kwargs
+        )
 
 
 class results_obj:
